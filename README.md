@@ -5,7 +5,8 @@
 <h1 align="center">HarFiddle</h1>
 
 <p align="center">
-  An HTTP/HTTPS debugging proxy for macOS that can replay HAR files.<br>
+  <b>A modern Fiddler Classic alternative for macOS.</b><br>
+  Capture and inspect HTTP/HTTPS traffic, and replay HAR files with an AutoResponder.<br>
   <a href="../../releases/latest">Download</a> · <a href="#usage">Usage</a> · <a href="#autoresponder-reference">AutoResponder</a> · <a href="#https">HTTPS</a> · <a href="#build-from-source">Build</a>
 </p>
 
@@ -13,8 +14,12 @@
 
 ![HarFiddle showing captured sessions and the JSON inspector](docs/screenshots/main.png)
 
-HarFiddle sits between your apps and the network. It records every request and response, lets you inspect and
-change them, and can answer requests itself from a HAR file instead of the real server.
+Missed Fiddler Classic since moving to a Mac? HarFiddle is a Fiddler clone for Mac, rebuilt from scratch as a native
+app: the same session list with its colored rows, Inspectors, AutoResponder, Composer, Statistics, QuickExec and the
+shortcuts you remember (F12, Ctrl+X, R to reissue, Ctrl+1…6 to mark).
+
+It sits between your apps and the network, records every request and response, lets you inspect and change them,
+and can answer requests itself from a HAR file instead of the real server.
 
 Use it to:
 
@@ -28,7 +33,7 @@ Use it to:
   a delay, or forward the request to another server.
 
 It runs natively on Apple Silicon and Intel Macs (macOS 12 or later). Node.js is bundled in the app, so there is
-nothing else to install. If you have used Fiddler Classic on Windows, the layout and shortcuts will feel familiar.
+nothing else to install.
 
 ## Download
 
@@ -79,6 +84,26 @@ replace one API's responses inside a real website or app.
   ```
 
 **Recording** pauses or resumes the session list without changing where traffic goes.
+
+### Search and filter
+
+Type in the search box in the toolbar (<kbd>⌘</kbd>+<kbd>F</kbd>) to filter the session list as you type. Plain words
+match anywhere: URL, method, status, content type, process or comment. Use a prefix to search one field, `-` to
+exclude, and combine terms freely:
+
+| Example | Shows |
+| --- | --- |
+| `login` | anything containing "login" |
+| `host:api.example.com` | requests to that host |
+| `path:/v1/users` | URLs containing that path |
+| `process:chrome` | requests sent by Chrome (see the Process column) |
+| `method:post` | POST requests |
+| `status:4xx` / `status:404` | client errors / exactly 404 |
+| `type:json` | JSON responses |
+| `source:auto` | answered by the AutoResponder (`live`, `har`, `error` also work) |
+| `host:api -process:python` | API requests not sent by Python |
+
+<kbd>Esc</kbd> clears the search. Clicking empty space in the list, or <kbd>Esc</kbd>, clears the selection.
 
 In the session list, rows with a ⚡ icon and a purple background were answered by the AutoResponder. All other rows
 went to the real server. Row colors show the content type: HTML blue, JavaScript green, CSS purple, images gray,
@@ -147,7 +172,8 @@ Any captured session can be turned into a rule with right-click › **Add to Aut
 | <kbd>Delete</kbd> | Remove selected | <kbd>Ctrl</kbd>+<kbd>X</kbd> | Remove all |
 | <kbd>⌘</kbd>+<kbd>A</kbd> | Select all | <kbd>⌘</kbd>+<kbd>U</kbd> | Copy URL |
 | <kbd>⌘</kbd>+<kbd>S</kbd> | Save sessions as HAR | <kbd>F7</kbd> / <kbd>F8</kbd> | Statistics / Inspectors |
-| <kbd>Alt</kbd>+<kbd>Q</kbd> or <kbd>/</kbd> | Go to QuickExec | <kbd>⌘</kbd>+<kbd>Enter</kbd> | Execute in Composer |
+| <kbd>⌘</kbd>+<kbd>F</kbd> or <kbd>/</kbd> | Search sessions | <kbd>Esc</kbd> | Clear the selection / search |
+| <kbd>Alt</kbd>+<kbd>Q</kbd> | Go to QuickExec | <kbd>⌘</kbd>+<kbd>Enter</kbd> | Execute in Composer |
 | <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>6</kbd> | Mark red, blue, gold, green, orange, purple | <kbd>Ctrl</kbd>+<kbd>0</kbd> | Unmark |
 
 ## HTTPS
@@ -279,5 +305,5 @@ HarFiddle is sponsored by [Catmouse](https://catmouse.ai/).
 [MIT](LICENSE). The bundled Node.js runtime has its own license, included in the app at
 `Contents/Resources/node/LICENSE`.
 
-HarFiddle is an independent open-source project. It is not affiliated with or endorsed by Progress Software
-Corporation. Fiddler is a trademark of Progress Software Corporation.
+HarFiddle is an independent open-source project, written from scratch, and contains no Fiddler code. It is not
+affiliated with or endorsed by Progress Software Corporation. Fiddler is a trademark of Progress Software Corporation.
