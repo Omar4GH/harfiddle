@@ -1,0 +1,50 @@
+{
+  "name": "harfiddle",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build:mac": "bash scripts/build-mac.sh"
+  },
+  "license": "MIT",
+  "description": "HTTP/HTTPS debugging proxy for macOS. Capture and inspect traffic, view HAR files, and replay HAR files as a mock server with an AutoResponder.",
+  "dependencies": {
+    "node-forge": "^1.4.0"
+  },
+  "bin": {
+    "harfiddle": "server.js"
+  },
+  "private": true,
+  "author": "Omar4GH",
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "fiddler",
+    "fiddler-alternative",
+    "fiddler-mac",
+    "http-proxy",
+    "https-proxy",
+    "debugging-proxy",
+    "mitm",
+    "mitm-proxy",
+    "har",
+    "har-file",
+    "har-viewer",
+    "har-replay",
+    "mock-server",
+    "api-mocking",
+    "autoresponder",
+    "web-debugging",
+    "network-debugging",
+    "traffic-inspector",
+    "charles-proxy-alternative",
+    "proxyman-alternative",
+    "macos"
+  ],
+  "files": [
+    "server.js",
+    "lib",
+    "public"
+  ]
+}

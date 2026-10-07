@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a6fe0"/>
+      <stop offset="1" stop-color="#1d3f9e"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe27a"/>
+      <stop offset="1" stop-color="#ffb21f"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000" flood-opacity=".28"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#ffffff" stroke-opacity=".12" stroke-width="4"/>
+  <!-- session list lines -->
+  <g fill="#ffffff">
+    <rect x="215" y="285" width="380" height="54" rx="27" opacity=".95"/>
+    <rect x="215" y="395" width="300" height="54" rx="27" opacity=".75"/>
+    <rect x="215" y="505" width="340" height="54" rx="27" opacity=".55"/>
+    <rect x="215" y="615" width="240" height="54" rx="27" opacity=".38"/>
+    <rect x="215" y="725" width="290" height="54" rx="27" opacity=".24"/>
+  </g>
+  <!-- AutoResponder bolt -->
+  <path d="M708 214 L512 540 H650 L590 822 L812 470 H668 Z" fill="url(#bolt)" stroke="#8a5600" stroke-width="16" stroke-linejoin="round"/>
+</svg>

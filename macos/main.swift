@@ -1,0 +1,339 @@
+// HarFiddle.app — a tiny native shell around the HarFiddle engine.
+//
+// It starts `node server.js` from the app bundle (bundled Node first, then a system install),
+// waits for the UI port to answer, and shows the UI in a WKWebView. Quitting the app stops the
+// engine, which restores the system proxy if capture was on.
+//
+// The proxy port is normally set in Tools › Options › Connections. To force ports instead:
+//   defaults write io.github.harfiddle ProxyPort 9000
+//   defaults write io.github.harfiddle UIPort 9001
+import Cocoa
+import WebKit
+
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+    var window: NSWindow!
+    var webView: WKWebView!
+    var server: Process?
+    var serverLog = ""
+    var quitting = false
+
+    lazy var proxyPort: Int = port("ProxyPort", 8888)
+    lazy var uiPort: Int = port("UIPort", 8899)
+    var uiURL: URL { URL(string: "http://127.0.0.1:\(uiPort)/")! }
+
+    func port(_ key: String, _ fallback: Int) -> Int {
+        let v = UserDefaults.standard.integer(forKey: key)
+        return (1...65535).contains(v) ? v : fallback
+    }
+
+    // MARK: lifecycle
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        buildMenu()
+        let config = WKWebViewConfiguration()
+        webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        if #available(macOS 13.3, *) { webView.isInspectable = true }
+
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 880),
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          backing: .buffered, defer: false)
+        window.title = "HarFiddle"
+        window.minSize = NSSize(width: 900, height: 520)
+        window.contentView = webView
+        window.setFrameAutosaveName("HarFiddleMainWindow")
+        if !window.setFrameUsingName("HarFiddleMainWindow") { window.center() }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        showMessage("Starting HarFiddle…")
+        startEngine()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let p = server, p.isRunning else { return .terminateNow }
+        quitting = true
+        p.terminate() // SIGTERM: the engine saves state and restores the system proxy
+        DispatchQueue.global().async {
+            let deadline = Date().addingTimeInterval(5)
+            while p.isRunning && Date() < deadline { usleep(50_000) }
+            if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
+        return .terminateLater
+    }
+
+    // MARK: engine
+
+    func startEngine() {
+        ping { alive in
+            if alive { self.loadUI(); return } // already running (e.g. started from Terminal): just attach
+            self.spawnEngine()
+        }
+    }
+
+    func spawnEngine() {
+        guard let resources = Bundle.main.resourceURL else { return }
+        let appDir = resources.appendingPathComponent("app")
+        guard let node = findNode() else {
+            fail("Node.js was not found.",
+                 "HarFiddle needs Node.js 18 or newer. Install it from https://nodejs.org, or use a release build that bundles Node.")
+            return
+        }
+        let p = Process()
+        p.executableURL = node
+        var args = [appDir.appendingPathComponent("server.js").path,
+                    "--no-open", "--exit-with-parent", "--ui-port", String(uiPort)]
+        // Only force the proxy port when set with `defaults write`; otherwise the engine uses the port
+        // chosen in Tools › Options › Connections (default 8888).
+        if UserDefaults.standard.object(forKey: "ProxyPort") != nil { args += ["--port", String(proxyPort)] }
+        p.arguments = args
+        p.currentDirectoryURL = appDir
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let s = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                self.serverLog += s
+                if self.serverLog.count > 20_000 { self.serverLog = String(self.serverLog.suffix(10_000)) }
+            }
+        }
+        p.terminationHandler = { proc in
+            DispatchQueue.main.async { self.engineExited(proc.terminationStatus) }
+        }
+        do {
+            try p.run()
+            server = p
+            waitForEngine(attempt: 0)
+        } catch {
+            fail("Could not start the HarFiddle engine.", error.localizedDescription)
+        }
+    }
+
+    func waitForEngine(attempt: Int) {
+        ping { alive in
+            if alive { self.loadUI(); return }
+            guard let p = self.server, p.isRunning else { return } // engineExited reports the error
+            if attempt > 150 { self.fail("The HarFiddle engine did not start.", self.serverLog); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.waitForEngine(attempt: attempt + 1) }
+        }
+    }
+
+    func engineExited(_ status: Int32) {
+        server = nil
+        if quitting { return }
+        let log = serverLog.trimmingCharacters(in: .whitespacesAndNewlines)
+        fail("The HarFiddle engine stopped (exit code \(status)).",
+             (log.isEmpty ? "" : String(log.suffix(1500)) + "\n\n") +
+             "If a port is busy, change it with:\ndefaults write io.github.harfiddle ProxyPort 9000")
+    }
+
+    func ping(_ done: @escaping (Bool) -> Void) {
+        var req = URLRequest(url: uiURL.appendingPathComponent("api/info"))
+        req.timeoutInterval = 1
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200 &&
+                (data.map { String(decoding: $0, as: UTF8.self).contains("proxyPort") } ?? false)
+            DispatchQueue.main.async { done(ok) }
+        }.resume()
+    }
+
+    func findNode() -> URL? {
+        let fm = FileManager.default
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("node/node"), fm.isExecutableFile(atPath: bundled.path) {
+            return bundled
+        }
+        var candidates = ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
+        let nvm = NSHomeDirectory() + "/.nvm/versions/node"
+        if let versions = try? fm.contentsOfDirectory(atPath: nvm) {
+            for v in versions.sorted(by: { $0.compare($1, options: .numeric) == .orderedDescending }) {
+                candidates.append("\(nvm)/\(v)/bin/node")
+            }
+        }
+        if let found = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) { return URL(fileURLWithPath: found) }
+        // last resort: ask a login shell (GUI apps don't inherit the shell PATH)
+        let sh = Process()
+        sh.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        sh.arguments = ["-lc", "command -v node"]
+        let out = Pipe()
+        sh.standardOutput = out
+        sh.standardError = FileHandle.nullDevice
+        guard (try? sh.run()) != nil else { return nil }
+        sh.waitUntilExit()
+        let path = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return fm.isExecutableFile(atPath: path) ? URL(fileURLWithPath: path) : nil
+    }
+
+    // MARK: UI
+
+    func loadUI() { webView.load(URLRequest(url: uiURL)) }
+
+    func showMessage(_ text: String) {
+        let html = """
+        <!doctype html><meta charset="utf-8"><body style="margin:0;height:100vh;display:grid;place-items:center;
+        background:#f0f0f0;font:13px -apple-system,'Segoe UI',sans-serif;color:#555">\(text)</body>
+        """
+        webView.loadHTMLString(html, baseURL: nil)
+    }
+
+    func fail(_ title: String, _ detail: String) {
+        showMessage(title)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Quit")
+        if alert.runModal() == .alertFirstButtonReturn {
+            serverLog = ""
+            showMessage("Starting HarFiddle…")
+            startEngine()
+        } else {
+            NSApp.terminate(nil)
+        }
+    }
+
+    @objc func reloadUI(_ sender: Any?) { loadUI() }
+    @objc func openInBrowser(_ sender: Any?) { NSWorkspace.shared.open(uiURL) }
+    @objc func openDataFolder(_ sender: Any?) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory() + "/.harfiddle"))
+    }
+
+    // MARK: WKNavigationDelegate
+
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = action.request.url else { return decisionHandler(.allow) }
+        let local = ["127.0.0.1", "localhost"].contains(url.host ?? "") && url.port == uiPort
+        if local || url.scheme == "about" || url.scheme == "data" { return decisionHandler(.allow) }
+        NSWorkspace.shared.open(url) // external links open in the default browser
+        decisionHandler(.cancel)
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if let http = response.response as? HTTPURLResponse,
+           let cd = http.value(forHTTPHeaderField: "Content-Disposition"), cd.lowercased().contains("attachment") {
+            return decisionHandler(.download)
+        }
+        decisionHandler(response.canShowMIMEType ? .allow : .download)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled || (error as NSError).code == 102 { return } // 102: turned into a download
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.startEngine() }
+    }
+
+    // MARK: WKDownloadDelegate (Save HAR, Export Root Certificate)
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse,
+                  suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = suggestedFilename
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: window) { result in
+            guard result == .OK, let url = panel.url else { return completionHandler(nil) }
+            try? FileManager.default.removeItem(at: url)
+            completionHandler(url)
+        }
+    }
+
+    // MARK: WKUIDelegate
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canChooseDirectories = false
+        panel.beginSheetModal(for: window) { result in
+            completionHandler(result == .OK ? panel.urls : nil)
+        }
+    }
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = action.request.url { NSWorkspace.shared.open(url) }
+        return nil
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.beginSheetModal(for: window) { _ in completionHandler() }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn) }
+    }
+
+    // MARK: menu
+
+    func buildMenu() {
+        let main = NSMenu()
+
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About HarFiddle", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Show Data Folder", action: #selector(openDataFolder(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide HarFiddle", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+            .keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit HarFiddle", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        main.addItem(withTitle: "HarFiddle", action: nil, keyEquivalent: "").submenu = appMenu
+
+        // Standard Edit menu: needed for copy/paste/select-all inside the web view's text fields.
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z").keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        main.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = edit
+
+        let view = NSMenu(title: "View")
+        view.addItem(withTitle: "Reload", action: #selector(reloadUI(_:)), keyEquivalent: "r")
+        view.addItem(withTitle: "Open in Browser", action: #selector(openInBrowser(_:)), keyEquivalent: "")
+        view.addItem(.separator())
+        view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+            .keyEquivalentModifierMask = [.command, .control]
+        main.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = view
+
+        let win = NSMenu(title: "Window")
+        win.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        win.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        main.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = win
+        NSApp.windowsMenu = win
+
+        NSApp.mainMenu = main
+    }
+}
+
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.regular)
+app.run()

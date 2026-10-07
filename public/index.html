@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HarFiddle Web Debugger</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M9.5 1 3.5 9h4l-1 6 6-8.2h-4z' fill='%23ffc83d' stroke='%23b07800' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="g-page"><path d="M3.5 1.5h6l3 3v10h-9z" fill="#fff" stroke="#7d7d7d"/><path d="M9.5 1.5v3h3" fill="#e8e8e8" stroke="#7d7d7d"/></g>
+  </defs>
+  <symbol id="i-doc" viewBox="0 0 16 16"><use href="#g-page"/><path d="M5.5 7.5h5M5.5 9.5h5M5.5 11.5h3" stroke="#a9a9a9"/></symbol>
+  <symbol id="i-html" viewBox="0 0 16 16"><use href="#g-page"/><path d="M6.3 7.6 4.8 9.4l1.5 1.8M9.7 7.6l1.5 1.8-1.5 1.8" fill="none" stroke="#1a5fd0" stroke-width="1.3"/></symbol>
+  <symbol id="i-js" viewBox="0 0 16 16"><use href="#g-page"/><rect x="4.8" y="7" width="6.4" height="5.6" rx=".6" fill="#2e8b2e"/><path d="M7.2 8.3v2.6c0 .6-.6.8-1.1.5M10.3 8.6c-.4-.4-1.6-.4-1.6.4s1.7.6 1.7 1.4-1.3.9-1.8.4" fill="none" stroke="#fff" stroke-width=".8"/></symbol>
+  <symbol id="i-css" viewBox="0 0 16 16"><use href="#g-page"/><rect x="4.8" y="7" width="6.4" height="5.6" rx=".6" fill="#8b3fc4"/><path d="M7 8.2v3.2M9 8.2v3.2M6.2 9.1h3.6M6.2 10.5h3.6" stroke="#fff" stroke-width=".8"/></symbol>
+  <symbol id="i-json" viewBox="0 0 16 16"><use href="#g-page"/><path d="M7 7.2c-.9 0-.9.5-.9 1.1v.6c0 .5-.3.8-.8.8.5 0 .8.3.8.8v.6c0 .6 0 1.1.9 1.1M9 7.2c.9 0 .9.5.9 1.1v.6c0 .5.3.8.8.8-.5 0-.8.3-.8.8v.6c0 .6 0 1.1-.9 1.1" fill="none" stroke="#b06d00" stroke-width="1.1"/></symbol>
+  <symbol id="i-img" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" fill="#fff" stroke="#5a7fa8"/><path d="M2.5 12.5 6 8l2.5 3 2-2 3 3.5z" fill="#4c9a3f"/><circle cx="11" cy="5.5" r="1.3" fill="#f2b705"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 16 16"><path d="M5.3 7V5.2a2.7 2.7 0 0 1 5.4 0V7" fill="none" stroke="#7d7d7d" stroke-width="1.5"/><rect x="3.5" y="7" width="9" height="7" rx="1" fill="#efc23a" stroke="#8a6d10"/><path d="M8 9.3v2" stroke="#8a6d10" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-err" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="#d9302c"/><path d="M8 4.5v4.2M8 10.7v.6" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-block" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.8" fill="#fff" stroke="#d9302c" stroke-width="2"/><path d="m4 12 8-8" stroke="#d9302c" stroke-width="2"/></symbol>
+  <symbol id="i-redir" viewBox="0 0 16 16"><use href="#g-page"/><path d="M5.5 12.5v-2.2c0-1.3.8-2 2-2h3" fill="none" stroke="#1a6fd6" stroke-width="1.4"/><path d="m9 6.6 1.8 1.7L9 10" fill="none" stroke="#1a6fd6" stroke-width="1.4"/></symbol>
+  <symbol id="i-304" viewBox="0 0 16 16"><use href="#g-page"/><circle cx="8" cy="9.8" r="2.6" fill="#e3eefa" stroke="#4f86c6"/><path d="M8 8.4v1.5l1 .7" fill="none" stroke="#4f86c6"/></symbol>
+  <symbol id="i-pending" viewBox="0 0 16 16"><path d="M8 13.5v-10M4.2 7.2 8 3.4l3.8 3.8" fill="none" stroke="#3b3b3b" stroke-width="1.7"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 16 16"><path d="M9.6 1 3.4 9.2h4.1l-1.1 5.8 6.2-8.3H8.5z" fill="#ffc83d" stroke="#a06d00" stroke-linejoin="round"/></symbol>
+  <symbol id="i-har" viewBox="0 0 16 16"><rect x="1.5" y="3" width="13" height="3" fill="#d9a35b" stroke="#8a5a1c"/><rect x="2.5" y="6" width="11" height="8" fill="#f2c983" stroke="#8a5a1c"/><path d="M6 8.5h4" stroke="#8a5a1c" stroke-width="1.3"/></symbol>
+  <symbol id="i-ws" viewBox="0 0 16 16"><path d="M2 5.5h10M9.5 3l2.5 2.5L9.5 8M14 10.5H4M6.5 8 4 10.5 6.5 13" fill="none" stroke="#555" stroke-width="1.3"/></symbol>
+  <symbol id="i-replay" viewBox="0 0 16 16"><path d="M13.2 8.3A5.2 5.2 0 1 1 11.6 4.5" fill="none" stroke="#2f8f2f" stroke-width="1.9"/><path d="M13 1.8v3.6H9.4" fill="none" stroke="#2f8f2f" stroke-width="1.9"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><path d="m3.8 3.8 8.4 8.4m0-8.4-8.4 8.4" stroke="#d9302c" stroke-width="2.3" stroke-linecap="round"/></symbol>
+  <symbol id="i-capture" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="9" rx="1" fill="#e9f1fb" stroke="#4a5a70"/><path d="M5.5 14h5M8 11.5V14" stroke="#4a5a70"/><circle cx="8" cy="7" r="2.6" fill="#d9302c"/></symbol>
+  <symbol id="i-capture-off" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="9" rx="1" fill="#f3f3f3" stroke="#8d8d8d"/><path d="M5.5 14h5M8 11.5V14" stroke="#8d8d8d"/><circle cx="8" cy="7" r="2.6" fill="#bdbdbd"/></symbol>
+  <symbol id="i-find" viewBox="0 0 16 16"><circle cx="4.6" cy="10.4" r="3" fill="#cfe3f7" stroke="#2d4e73" stroke-width="1.2"/><circle cx="11.4" cy="10.4" r="3" fill="#cfe3f7" stroke="#2d4e73" stroke-width="1.2"/><path d="M2.6 8 4.4 2.8h2l.6 5M13.4 8l-1.8-5.2h-2L9 7.8M7 9.5h2" fill="none" stroke="#2d4e73" stroke-width="1.2"/></symbol>
+  <symbol id="i-save" viewBox="0 0 16 16"><path d="M2 2h10l2 2v10H2z" fill="#3c6eb4" stroke="#24467a"/><rect x="4.5" y="2.5" width="6" height="4" fill="#fff"/><rect x="4" y="9" width="8" height="4.5" fill="#e4ecf7"/></symbol>
+  <symbol id="i-open" viewBox="0 0 16 16"><path d="M1.5 3.5h4.3l1.4 1.5h6.3v8.5h-12z" fill="#f4c542" stroke="#a5800f"/><path d="M1.5 13.5 3.3 7.5h12l-1.8 6z" fill="#f9d977" stroke="#a5800f"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="#d6ebff" stroke="#2869c0"/><path d="M1.7 8h12.6M8 1.7c-2.3 2.4-2.3 10.2 0 12.6M8 1.7c2.3 2.4 2.3 10.2 0 12.6M2.8 4.8h10.4M2.8 11.2h10.4" fill="none" stroke="#2869c0" stroke-width=".9"/></symbol>
+  <symbol id="i-stats" viewBox="0 0 16 16"><circle cx="8" cy="9.2" r="5.4" fill="#fff" stroke="#3d3d3d" stroke-width="1.3"/><path d="M8 9.2V6.2M6.3 1.8h3.4M8 2v1.8M12.3 4.2l1-1" stroke="#3d3d3d" stroke-width="1.3"/></symbol>
+  <symbol id="i-inspect" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="4.3" fill="#e3f0fb" stroke="#2d4e73" stroke-width="1.5"/><path d="m9.8 9.8 4.2 4.2" stroke="#8b5a2b" stroke-width="2.4" stroke-linecap="round"/></symbol>
+  <symbol id="i-compose" viewBox="0 0 16 16"><path d="m2.5 13.5.8-3.1 7.5-7.5 2.3 2.3-7.5 7.5z" fill="#f7c948" stroke="#7a5c00"/><path d="m2.5 13.5 2.9-.8-2.1-2.1z" fill="#3d3d3d"/><path d="m9.6 4.1 2.3 2.3" stroke="#7a5c00"/></symbol>
+  <symbol id="i-log" viewBox="0 0 16 16"><use href="#g-page"/><path d="M5.5 6.5h5M5.5 8.5h5M5.5 10.5h5M5.5 12.5h3" stroke="#6b6b6b"/></symbol>
+  <symbol id="i-options" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.4" fill="none" stroke="#4d4d4d" stroke-width="1.5"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2M3.4 3.4 5 5M11 11l1.6 1.6M3.4 12.6 5 11M11 5l1.6-1.6" stroke="#4d4d4d" stroke-width="1.7" stroke-linecap="round"/></symbol>
+  <symbol id="i-cert" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="9" fill="#fffdf2" stroke="#9c8a4a"/><path d="M3.5 5h6M3.5 7h4" stroke="#9c8a4a"/><circle cx="11.5" cy="9.5" r="2.3" fill="#d9302c"/><path d="m10.4 11.5-.7 3 1.8-1 1.8 1-.7-3" fill="#d9302c"/></symbol>
+  <symbol id="i-rec" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="#fff" stroke="#8d8d8d"/><circle cx="8" cy="8" r="4" fill="#d9302c"/></symbol>
+  <symbol id="i-rec-off" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="#fff" stroke="#8d8d8d"/><rect x="5.3" y="5" width="1.9" height="6" fill="#6d6d6d"/><rect x="8.8" y="5" width="1.9" height="6" fill="#6d6d6d"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 1.6 15 14H1z" fill="#ffd34d" stroke="#a87b00" stroke-linejoin="round"/><path d="M8 6v4M8 11.7v.4" stroke="#3d2c00" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="#2f74d0"/><path d="M8 7v4.5M8 4.6v.4" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/></symbol>
+</svg>
+
+<!-- menu bar -->
+<nav class="menubar" id="menubar">
+  <div class="menu"><button class="mb">File</button>
+    <div class="dropdown">
+      <button data-cmd="record" data-check="record">Record Sessions</button>
+      <button data-cmd="capture" data-check="capture">Capture System Traffic<kbd>F12</kbd></button>
+      <hr>
+      <button data-cmd="importSessions">Import Sessions (HAR)…</button>
+      <button data-cmd="importRules">Import HAR as AutoResponder Rules…</button>
+      <hr>
+      <button data-cmd="saveAll">Save All Sessions as HAR<kbd>⌘S</kbd></button>
+      <button data-cmd="saveSelected" data-needs="sel">Save Selected Sessions as HAR</button>
+    </div>
+  </div>
+  <div class="menu"><button class="mb">Edit</button>
+    <div class="dropdown">
+      <button data-cmd="copyUrl" data-needs="sel">Copy URL<kbd>⌘U</kbd></button>
+      <button data-cmd="copyCurl" data-needs="sel">Copy as cURL</button>
+      <hr>
+      <button data-cmd="selectAll">Select All<kbd>⌘A</kbd></button>
+      <button data-cmd="removeSelected" data-needs="sel">Remove Selected Sessions<kbd>Del</kbd></button>
+      <button data-cmd="removeAll">Remove All Sessions<kbd>Ctrl+X</kbd></button>
+      <hr>
+      <button data-cmd="mark:red" data-needs="sel"><i class="sw sw-red"></i>Mark Red<kbd>Ctrl+1</kbd></button>
+      <button data-cmd="mark:blue" data-needs="sel"><i class="sw sw-blue"></i>Mark Blue<kbd>Ctrl+2</kbd></button>
+      <button data-cmd="mark:gold" data-needs="sel"><i class="sw sw-gold"></i>Mark Gold<kbd>Ctrl+3</kbd></button>
+      <button data-cmd="mark:green" data-needs="sel"><i class="sw sw-green"></i>Mark Green<kbd>Ctrl+4</kbd></button>
+      <button data-cmd="mark:orange" data-needs="sel"><i class="sw sw-orange"></i>Mark Orange<kbd>Ctrl+5</kbd></button>
+      <button data-cmd="mark:purple" data-needs="sel"><i class="sw sw-purple"></i>Mark Purple<kbd>Ctrl+6</kbd></button>
+      <button data-cmd="mark:" data-needs="sel">Unmark<kbd>Ctrl+0</kbd></button>
+      <hr>
+      <button data-cmd="find">Find Sessions…<kbd>Ctrl+F</kbd></button>
+    </div>
+  </div>
+  <div class="menu"><button class="mb">Rules</button>
+    <div class="dropdown">
+      <button data-cmd="toggleRules" data-check="rulesEnabled">Enable AutoResponder Rules</button>
+      <button data-cmd="togglePassthrough" data-check="passthrough">Unmatched Requests Passthrough</button>
+      <button data-cmd="toggleLatency" data-check="simulateLatency">Simulate Recorded Latency</button>
+      <hr>
+      <button data-cmd="toggleDecrypt" data-check="decryptHttps">Decrypt HTTPS Traffic</button>
+      <button data-cmd="toggleHideConnects" data-check="hideConnects">Hide CONNECT Tunnels</button>
+      <hr>
+      <button data-cmd="resetHits">Reset Rule Hit Counts</button>
+    </div>
+  </div>
+  <div class="menu"><button class="mb">Tools</button>
+    <div class="dropdown">
+      <button data-cmd="options">Options…</button>
+      <hr>
+      <button data-cmd="chrome">Launch Chrome via HarFiddle</button>
+      <button data-cmd="edge" class="needs-edge">Launch Edge via HarFiddle</button>
+      <hr>
+      <button data-cmd="trust">Trust Root Certificate…</button>
+      <button data-cmd="downloadCert">Export Root Certificate</button>
+    </div>
+  </div>
+  <div class="menu"><button class="mb">View</button>
+    <div class="dropdown">
+      <button data-cmd="tab:stats" data-check="tab:stats">Statistics<kbd>F7</kbd></button>
+      <button data-cmd="tab:inspector" data-check="tab:inspector">Inspectors<kbd>F8</kbd></button>
+      <button data-cmd="tab:rules" data-check="tab:rules">AutoResponder</button>
+      <button data-cmd="tab:composer" data-check="tab:composer">Composer</button>
+      <button data-cmd="tab:log" data-check="tab:log">Log</button>
+      <hr>
+      <button data-cmd="show:all" data-check="show:all">Show All Sessions</button>
+      <button data-cmd="show:auto" data-check="show:auto">Show AutoResponded Only</button>
+      <button data-cmd="show:live" data-check="show:live">Show Live Traffic Only</button>
+      <button data-cmd="show:har" data-check="show:har">Show Imported Only</button>
+      <button data-cmd="show:error" data-check="show:error">Show Errors Only</button>
+      <button data-cmd="show:marked" data-check="show:marked">Show Marked Only</button>
+    </div>
+  </div>
+  <div class="menu"><button class="mb">Help</button>
+    <div class="dropdown">
+      <button data-cmd="help">Getting Started</button>
+      <button data-cmd="qxhelp">QuickExec Commands</button>
+      <hr>
+      <button data-cmd="about">About HarFiddle</button>
+    </div>
+  </div>
+</nav>
+
+<!-- toolbar -->
+<div class="toolbar" id="toolbar">
+  <button class="tb" data-cmd="replay" title="Reissue the selected requests (R)"><svg><use href="#i-replay"/></svg>Replay</button>
+  <div class="tb-split">
+    <button class="tb" data-cmd="removeSelected" title="Remove the selected sessions (Delete)"><svg><use href="#i-x"/></svg></button>
+    <div class="menu"><button class="tb caret" title="Remove sessions">▾</button>
+      <div class="dropdown">
+        <button data-cmd="removeAll">Remove all<kbd>Ctrl+X</kbd></button>
+        <button data-cmd="removeSelected" data-needs="sel">Remove selected<kbd>Del</kbd></button>
+        <button data-cmd="removeUnselected" data-needs="sel">Remove unselected</button>
+        <button data-cmd="removeImported">Remove imported sessions</button>
+      </div>
+    </div>
+  </div>
+  <span class="tb-sep"></span>
+  <button class="tb" data-cmd="record" id="tbRecord" title="Add requests that reach HarFiddle to the session list. Turn off to pause the list; traffic still flows."><svg><use href="#i-rec"/></svg><span>Recording</span></button>
+  <button class="tb" data-cmd="capture" id="tbCapture" title="System Proxy (F12): send every app's traffic on this Mac through HarFiddle. When off, only Browse, direct requests and clients you point at the proxy are recorded."><svg><use href="#i-capture-off"/></svg><span>System Proxy: Off</span></button>
+  <span class="tb-sep"></span>
+  <label class="tb-combo">Keep:
+    <select id="keep" title="How many sessions to keep in the list">
+      <option value="0">All sessions</option><option value="100">100 sessions</option><option value="500">500 sessions</option><option value="1000">1000 sessions</option>
+    </select>
+  </label>
+  <label class="tb-combo">Show:
+    <select id="show">
+      <option value="all">All sessions</option><option value="auto">AutoResponded</option><option value="live">Live traffic</option><option value="har">Imported</option><option value="error">Errors</option><option value="marked">Marked</option>
+    </select>
+  </label>
+  <span class="tb-sep"></span>
+  <button class="tb" data-cmd="find" title="Find sessions (Ctrl+F)"><svg><use href="#i-find"/></svg>Find</button>
+  <button class="tb" data-cmd="saveAll" title="Save sessions as a .har file"><svg><use href="#i-save"/></svg>Save</button>
+  <button class="tb" data-cmd="importSessions" title="Open a .har file in the session list"><svg><use href="#i-open"/></svg>Load</button>
+  <span class="tb-sep"></span>
+  <button class="tb" data-cmd="chrome" title="Launch Chrome through HarFiddle (separate profile, certificate pre-accepted)"><svg><use href="#i-globe"/></svg>Browse</button>
+  <span class="grow"></span>
+  <button class="tb" data-cmd="options" title="Tools › Options"><svg><use href="#i-options"/></svg>Options</button>
+</div>
+
+<div class="infobar banner" id="trustBanner" hidden>
+  <svg><use href="#i-warn"/></svg>
+  <span><b>HTTPS from system traffic is not decrypted.</b> Your Mac doesn't trust the HarFiddle root certificate, so HTTPS connections are passed through untouched: everything keeps working, but you only see host names. Trust the certificate to see the contents.</span>
+  <a href="#" id="bannerTrust">Trust the certificate…</a>
+</div>
+
+<main id="main">
+  <section class="left">
+    <div class="list" id="sessWrap" tabindex="0">
+      <table class="lv" id="sessTable">
+        <colgroup id="sessCols"></colgroup>
+        <thead><tr id="sessHead"></tr></thead>
+        <tbody id="sessBody"></tbody>
+      </table>
+      <div class="list-empty" id="sessEmpty">
+        <p>No sessions yet.</p>
+        <p>Click <b>Browse</b> to open a Chrome window that's recorded, turn on <b>System Proxy</b> (F12) to record every app on this Mac, send requests through <span class="mono" id="emptyProxy">127.0.0.1:8888</span>, or drop a <b>.har</b> file here.</p>
+      </div>
+    </div>
+    <div class="quickexec"><input id="qx" spellcheck="false" autocomplete="off" placeholder="[QuickExec] ALT+Q > type HELP to learn more"></div>
+  </section>
+
+  <div class="vsplit" id="vsplit"></div>
+
+  <section class="right">
+    <div class="tabstrip" id="tabs" role="tablist">
+      <button data-tab="stats"><svg><use href="#i-stats"/></svg>Statistics</button>
+      <button data-tab="inspector"><svg><use href="#i-inspect"/></svg>Inspectors</button>
+      <button data-tab="rules"><svg><use href="#i-bolt"/></svg>AutoResponder</button>
+      <button data-tab="composer"><svg><use href="#i-compose"/></svg>Composer</button>
+      <button data-tab="log"><svg><use href="#i-log"/></svg>Log</button>
+    </div>
+
+    <div class="tabpage" id="tab-stats"><pre class="stats" id="statsText"></pre></div>
+
+    <div class="tabpage" id="tab-inspector">
+      <div class="ipane" id="reqPane">
+        <div class="viewtabs" id="reqTabs"></div>
+        <div class="infobar" id="reqBar" hidden></div>
+        <div class="view" id="reqView"></div>
+      </div>
+      <div class="hsplit" id="hsplit"></div>
+      <div class="ipane" id="resPane">
+        <div class="infobar" id="resBar" hidden></div>
+        <div class="viewtabs" id="resTabs"></div>
+        <div class="view" id="resView"></div>
+      </div>
+    </div>
+
+    <div class="tabpage" id="tab-rules">
+      <div class="ar">
+        <div class="ar-hint"><svg><use href="#i-bolt"/></svg><span>HarFiddle can return previously recorded responses instead of using the network.</span> <a href="#" data-cmd="help">Learn more…</a></div>
+        <div class="ar-row">
+          <label class="cb"><input type="checkbox" data-setting="rulesEnabled">Enable rules</label>
+          <label class="cb" title="When unchecked, requests that match no rule get a 404 instead of reaching the server"><input type="checkbox" data-setting="passthrough">Unmatched requests passthrough</label>
+          <label class="cb" title="Wait as long as the original request took (from HAR timings)"><input type="checkbox" data-setting="simulateLatency">Enable Latency</label>
+          <span class="grow"></span>
+          <button class="wbtn" id="addRule">Add Rule</button>
+          <button class="wbtn" data-cmd="importRules">Import…</button>
+        </div>
+        <details class="ar-options">
+          <summary>Matching options</summary>
+          <div class="opt-grid">
+            <label class="cb"><input type="checkbox" data-setting="matchMethod">Match HTTP method</label>
+            <label class="cb"><input type="checkbox" data-setting="matchQuery">Match query string (any order)</label>
+            <label class="cb"><input type="checkbox" data-setting="ignoreHost">Ignore scheme and host (match path only)</label>
+            <label class="cb"><input type="checkbox" data-setting="matchBody">Match POST body (JSON key order ignored)</label>
+            <label class="fld">Ignore query params: <input data-setting="ignoreParams" placeholder="_, cb, timestamp" spellcheck="false"></label>
+            <label class="fld">Repeated requests:
+              <select data-setting="duplicates">
+                <option value="sequence">Play in recorded order, then repeat the last</option>
+                <option value="cycle">Cycle through the recorded order</option>
+                <option value="first">Always use the first match</option>
+              </select>
+            </label>
+            <label class="fld wide">Fallback upstream for direct requests to <span class="mono directBase">localhost:8888</span>: <input data-setting="fallbackUpstream" placeholder="https://api.example.com" spellcheck="false"></label>
+            <label class="cb wide"><input type="checkbox" data-setting="directFriendly">Direct mode helpers: add CORS headers, answer preflights, drop cookie Domain/Secure</label>
+          </div>
+        </details>
+        <div class="sources" id="sources"></div>
+        <div class="list rules-list" id="rulesWrap" tabindex="0">
+          <table class="lv" id="rulesTable">
+            <colgroup><col style="width:26px"><col style="width:46%"><col style="width:30%"><col style="width:62px"><col style="width:44px"><col style="width:24%"></colgroup>
+            <thead><tr><th></th><th>If request matches…</th><th>then respond with…</th><th>Method</th><th class="num">Hits</th><th>From</th></tr></thead>
+            <tbody id="rulesBody"></tbody>
+          </table>
+          <div class="list-empty" id="rulesEmpty"><p>No rules. Click <b>Import…</b>, or drop a .har file on the window and choose <b>AutoResponder</b>.</p></div>
+        </div>
+        <div class="ar-filter"><input id="ruleFilter" placeholder="Filter rules…" spellcheck="false"><span class="muted" id="ruleCountText"></span></div>
+        <fieldset class="rule-editor" id="ruleEditor" disabled>
+          <legend>Rule Editor</legend>
+          <div class="re-line">
+            <input id="reMatch" class="mono" list="matchHints" spellcheck="false" placeholder="EXACT:https://…  ·  REGEX:^https://api\.example\.com/(.*)  ·  or text in the URL">
+            <button class="wbtn" id="reTest">Test…</button>
+          </div>
+          <div class="re-line">
+            <input id="reAction" class="mono" list="actionHints" spellcheck="false" placeholder="(recorded response)">
+            <button class="wbtn default" id="reSave">Save</button>
+          </div>
+          <div class="re-line">
+            <label class="cb"><input type="checkbox" id="reOnce">Match only once</label>
+            <label class="fld inline">Method <input id="reMethod" class="mono" spellcheck="false" placeholder="*"></label>
+            <span class="grow"></span>
+            <button class="wbtn" id="reTop">Move to top</button>
+            <button class="wbtn" id="reDelete">Remove</button>
+          </div>
+          <details class="re-response" id="reResponse" open>
+            <summary>Recorded response <span class="muted" id="reInfo"></span></summary>
+            <div class="re-grid">
+              <label class="fld inline">Status <input id="reStatus" type="number" min="100" max="599"></label>
+              <label class="fld inline">Delay (ms) <input id="reDelay" type="number" min="0" placeholder="none"></label>
+            </div>
+            <label class="fld">Headers<textarea id="reHeaders" class="mono" rows="4" spellcheck="false"></textarea></label>
+            <label class="fld grow-fld"><span id="reBodyLabel">Body</span><textarea id="reBody" class="mono" spellcheck="false"></textarea><span class="binary-note" id="reBinary" hidden></span></label>
+          </details>
+        </fieldset>
+        <datalist id="actionHints">
+          <option value="">recorded response</option>
+          <option value="*200">empty 200 OK</option>
+          <option value="*404">404 Not Found</option>
+          <option value="*500">500 error</option>
+          <option value="*delay:2000">wait 2 s, then send to the server</option>
+          <option value="*drop">close the connection, no response</option>
+          <option value="*reset">reset the connection</option>
+          <option value="*redir:https://example.com/">307 redirect</option>
+          <option value="http://localhost:3000/">send to another server (REGEX $1 groups allowed)</option>
+          <option value="/Users/you/response.json">serve a local file</option>
+        </datalist>
+        <datalist id="matchHints"><option value="EXACT:"></option><option value="REGEX:"></option><option value="*"></option></datalist>
+      </div>
+    </div>
+
+    <div class="tabpage" id="tab-composer">
+      <div class="composer">
+        <div class="viewtabs" id="cmpTabs"><button data-v="parsed" class="on">Parsed</button><button data-v="raw">Raw</button></div>
+        <div class="cmp-body">
+          <div class="cmp-top">
+            <select id="cMethod"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>HEAD</option><option>OPTIONS</option></select>
+            <input id="cUrl" class="mono" placeholder="https://api.example.com/path" spellcheck="false">
+            <select id="cVer"><option>HTTP/1.1</option></select>
+            <button class="wbtn execute" id="cSend">Execute</button>
+          </div>
+          <div id="cParsed" class="cmp-parsed">
+            <label class="fld grow-fld">Request Headers<textarea id="cHeaders" class="mono" spellcheck="false" placeholder="User-Agent: HarFiddle&#10;Content-Type: application/json"></textarea></label>
+            <label class="fld grow-fld">Request Body<textarea id="cBody" class="mono" spellcheck="false"></textarea></label>
+          </div>
+          <div id="cRaw" class="cmp-parsed" hidden>
+            <label class="fld grow-fld">Raw request<textarea id="cRawText" class="mono" spellcheck="false"></textarea></label>
+          </div>
+          <div class="cmp-opts">
+            <label class="cb"><input type="checkbox" id="cInspect" checked>Inspect session</label>
+            <label class="cb"><input type="checkbox" id="cUseRules" checked>Let AutoResponder answer</label>
+            <span class="grow"></span>
+            <span class="muted">⌘Enter executes</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tabpage" id="tab-log"><div class="logview mono" id="logView"></div></div>
+  </section>
+</main>
+
+<footer class="statusbar">
+  <button class="sb-cell sb-capture" id="sbCapture" title="Click to toggle capturing (F12)"><svg><use href="#i-capture-off"/></svg><span></span></button>
+  <span class="sb-cell" id="sbProc">All Processes</span>
+  <span class="sb-cell" id="sbCount">0</span>
+  <span class="sb-cell sb-text" id="sbText"></span>
+  <span class="sb-cell" id="sbRules"></span>
+  <span class="sb-cell sb-conn" id="sbConn" title="Connection to the HarFiddle engine"><i></i></span>
+</footer>
+
+<div class="dropdown ctx" id="colmenu" hidden></div>
+<div class="dropdown ctx" id="ctx" hidden>
+  <button data-cmd="addRule" data-needs="sel"><svg><use href="#i-bolt"/></svg>Add to AutoResponder</button>
+  <hr>
+  <div class="markrow"><span>Mark</span>
+    <button data-cmd="mark:red" data-needs="sel" class="sw sw-red" title="Red (Ctrl+1)"></button>
+    <button data-cmd="mark:blue" data-needs="sel" class="sw sw-blue" title="Blue (Ctrl+2)"></button>
+    <button data-cmd="mark:gold" data-needs="sel" class="sw sw-gold" title="Gold (Ctrl+3)"></button>
+    <button data-cmd="mark:green" data-needs="sel" class="sw sw-green" title="Green (Ctrl+4)"></button>
+    <button data-cmd="mark:orange" data-needs="sel" class="sw sw-orange" title="Orange (Ctrl+5)"></button>
+    <button data-cmd="mark:purple" data-needs="sel" class="sw sw-purple" title="Purple (Ctrl+6)"></button>
+    <button data-cmd="mark:" data-needs="sel" class="sw sw-none" title="Unmark (Ctrl+0)">✕</button>
+  </div>
+  <hr>
+  <button data-cmd="copyUrl" data-needs="sel">Copy URL<kbd>⌘U</kbd></button>
+  <button data-cmd="copyCurl" data-needs="sel">Copy as cURL</button>
+  <hr>
+  <button data-cmd="replay" data-needs="sel"><svg><use href="#i-replay"/></svg>Reissue Requests<kbd>R</kbd></button>
+  <button data-cmd="replayLive" data-needs="sel">Reissue Without AutoResponder</button>
+  <button data-cmd="compose" data-needs="sel"><svg><use href="#i-compose"/></svg>Reissue and Edit</button>
+  <hr>
+  <button data-cmd="removeSelected" data-needs="sel"><svg><use href="#i-x"/></svg>Remove<kbd>Del</kbd></button>
+  <button data-cmd="removeAll">Remove All<kbd>Ctrl+X</kbd></button>
+  <hr>
+  <button data-cmd="saveSelected" data-needs="sel"><svg><use href="#i-save"/></svg>Save Selected as HAR</button>
+</div>
+
+<div class="modal" id="optionsDlg" hidden>
+  <div class="window" role="dialog" aria-label="Options">
+    <div class="wtitle"><span>Options</span><button class="wclose" data-close aria-label="Close">✕</button></div>
+    <div class="wbody">
+      <div class="viewtabs" id="optTabs"><button data-v="https" class="on">HTTPS</button><button data-v="connections">Connections</button><button data-v="usage">Getting Started</button></div>
+      <div class="optpage" data-page="https">
+        <label class="cb"><input type="checkbox" data-setting="decryptHttps">Decrypt HTTPS traffic</label>
+        <p class="muted">To read HTTPS, HarFiddle answers each connection with its own certificate for that site (TLS interception), signed by a root certificate created on this Mac. Clients only accept that if they trust the root certificate.</p>
+        <p class="muted">So that system capture never breaks your internet, traffic from the system proxy is decrypted only on port 443, only while macOS trusts the root certificate, and never for hosts whose app rejected the certificate (those are tunneled for 30 minutes; see Log). Browse windows and clients you point at the proxy yourself are always decrypted.</p>
+        <div class="certbox">
+          <svg><use href="#i-cert"/></svg>
+          <div class="grow">
+            <div><b>HarFiddle Root CA</b> — <span id="caTrust"></span></div>
+            <div class="mono small muted" id="caFp"></div>
+            <div class="mono small muted" id="caPath"></div>
+          </div>
+          <div class="col-btns">
+            <button class="wbtn" data-cmd="trust">Trust Root Certificate…</button>
+            <button class="wbtn" data-cmd="downloadCert">Export Root Certificate</button>
+          </div>
+        </div>
+        <label class="fld">Skip decryption for the following hosts (tunnel only, wildcards like *.apple.com):
+          <textarea data-setting="tunnelHosts" class="mono" rows="3" spellcheck="false"></textarea>
+        </label>
+      </div>
+      <div class="optpage" data-page="connections" hidden>
+        <div class="fld inline">HarFiddle listens on port: <input id="optPort" class="mono" type="number" min="1" max="65535" style="width:80px"> <button class="wbtn" id="optPortApply">Apply</button> <span class="muted" id="optPortMsg"></span></div>
+        <p class="muted">Takes effect immediately and is remembered. If the system proxy is on, it is moved to the new port too. Browse windows use their own port (<span class="mono" id="optBrowsePort"></span>) and keep working.</p>
+        <label class="cb"><input type="checkbox" id="optSys">Act as system proxy (Capture Traffic, F12)</label>
+        <p class="muted">Sets HarFiddle as the HTTP and HTTPS proxy for every network service, and restores your previous settings when capture stops or HarFiddle quits.</p>
+        <div class="row-btns"><button class="wbtn" data-cmd="chrome">Launch Chrome via HarFiddle</button><button class="wbtn needs-edge" data-cmd="edge">Launch Edge via HarFiddle</button></div>
+        <p class="muted">Launched browsers use a separate profile that accepts the HarFiddle certificate, so they work without trusting it system-wide.</p>
+        <p class="muted" id="optLan"></p>
+      </div>
+      <div class="optpage" data-page="usage" hidden>
+        <h4>Replay a HAR on a local port</h4>
+        <p>Point your app at <span class="mono directBase">http://localhost:8888</span>. Requests are matched by path and query against your AutoResponder rules; unmatched ones go to the fallback upstream (AutoResponder › Matching options).</p>
+        <pre class="mono" id="directExample"></pre>
+        <h4>Use it as a proxy</h4>
+        <p>Turn on <b>System Proxy</b> (F12) for the whole Mac, use <b>Browse</b> for an isolated Chrome, or set the proxy yourself:</p>
+        <pre class="mono" id="cliExample"></pre>
+        <h4>AutoResponder actions (“then respond with…”)</h4>
+        <pre class="mono">(empty)                the recorded response
+*404, *500 …           that status, empty body
+*delay:2000            wait, then send to the real server
+*drop  /  *reset       close / reset the connection
+*redir:https://…       307 redirect
+http://localhost:3000  send to another server (REGEX $1, $2 … allowed)
+/path/to/file.json     serve a local file</pre>
+      </div>
+    </div>
+    <div class="wfoot"><button class="wbtn default" data-close>OK</button></div>
+  </div>
+</div>
+
+<div class="modal" id="testDlg" hidden>
+  <div class="window small-win" role="dialog" aria-label="Validate Rule">
+    <div class="wtitle"><span>Validate Rule</span><button class="wclose" data-close aria-label="Close">✕</button></div>
+    <div class="wbody">
+      <p>Enter a URL to test against <span class="mono" id="testRuleText"></span></p>
+      <div class="re-line"><select id="testMethod"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option><option>OPTIONS</option></select><input id="testUrl" class="mono" spellcheck="false"></div>
+      <div id="testResult" class="test-result"></div>
+    </div>
+    <div class="wfoot"><button class="wbtn default" id="testRun">Test</button><button class="wbtn" data-close>Close</button></div>
+  </div>
+</div>
+
+<div class="modal" id="aboutDlg" hidden>
+  <div class="window small-win" role="dialog" aria-label="About HarFiddle">
+    <div class="wtitle"><span>About HarFiddle</span><button class="wclose" data-close aria-label="Close">✕</button></div>
+    <div class="wbody about">
+      <svg><use href="#i-bolt"/></svg>
+      <div><b>HarFiddle Web Debugger</b><br>An HTTP/HTTPS debugging proxy for macOS with a HAR-driven AutoResponder.<br><span class="muted" id="aboutInfo"></span></div>
+    </div>
+    <div class="wfoot"><button class="wbtn default" data-close>OK</button></div>
+  </div>
+</div>
+
+<div class="drop-overlay" id="drop" hidden>
+  <div class="zone" data-zone="inspect"><svg><use href="#i-inspect"/></svg><b>Inspect</b><span>Open the requests in the session list</span></div>
+  <div class="zone" data-zone="rules"><svg><use href="#i-bolt"/></svg><b>AutoResponder</b><span>Replay the recorded responses as rules</span></div>
+</div>
+
+<input type="file" id="fileSessions" accept=".har,.json,application/json" multiple hidden>
+<input type="file" id="fileRules" accept=".har,.json,application/json" multiple hidden>
+<script src="app.js"></script>
+</body>
+</html>
