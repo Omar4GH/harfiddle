@@ -9,6 +9,8 @@
   <a href="../../releases/latest">Download</a> · <a href="#usage">Usage</a> · <a href="#autoresponder-reference">AutoResponder</a> · <a href="#https">HTTPS</a> · <a href="#build-from-source">Build</a>
 </p>
 
+<p align="center"><sub>Sponsored by <a href="https://catmouse.ai/">Catmouse</a></sub></p>
+
 ![HarFiddle showing captured sessions and the JSON inspector](docs/screenshots/main.png)
 
 HarFiddle sits between your apps and the network. It records every request and response, lets you inspect and
@@ -267,6 +269,10 @@ Issues and pull requests are welcome. To work on the UI, edit `public/`, run `np
 Run `npm test` before sending a change. It starts HarFiddle with a temporary data folder and local test
 servers and checks the proxy, HTTPS interception, AutoResponder, HAR import/export and the API. It never
 touches your system proxy or keychain.
+
+## Sponsor
+
+HarFiddle is sponsored by [Catmouse](https://catmouse.ai/).
 
 ## License
 
