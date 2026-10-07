@@ -38,6 +38,7 @@ const DATA_DIR = path.join(os.homedir(), '.harfiddle');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const SYSPROXY_BACKUP = path.join(DATA_DIR, 'sysproxy-backup.json');
 const MAX_SESSIONS = 5000;
+const MAX_SESSION_BYTES = 1024 * 1024 * 1024; // all captured bodies together; the oldest sessions go first
 const MAX_BODY = 20 * 1024 * 1024;
 
 const DEFAULT_SETTINGS = {
@@ -64,12 +65,39 @@ let sources = {}; // name -> { enabled, importedAt }
 
 // ---------------------------------------------------------------- persistence
 function loadState() {
+  let st;
   try {
-    const st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    settings = { ...DEFAULT_SETTINGS, ...st.settings, capture: true };
-    rules = (st.rules || []).map((r) => ({ ...r, hits: 0 }));
-    sources = st.sources || {};
-  } catch {}
+    st = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch (e) {
+    if (e.code === 'ENOENT') return;
+    // keep the damaged file instead of overwriting it with an empty state on the next save
+    const bad = `${STATE_FILE}.damaged-${Date.now()}`;
+    try { fs.renameSync(STATE_FILE, bad); } catch {}
+    console.error(`Could not read ${STATE_FILE} (${e.message}). It was moved to ${bad}; starting with default settings.`);
+    startupWarnings.push(`Your saved rules and settings could not be read, so HarFiddle started fresh. The old file was kept as ${bad}.`);
+    return;
+  }
+  if (!st || typeof st !== 'object') return;
+  const saved = st.settings && typeof st.settings === 'object' ? st.settings : {};
+  settings = { ...DEFAULT_SETTINGS, ...cleanSettings(saved), proxyPort: saved.proxyPort, capture: true };
+  rules = (Array.isArray(st.rules) ? st.rules : []).filter((r) => r && typeof r === 'object').map((r) => normalizeRule({ ...r, hits: 0 }));
+  sources = st.sources && typeof st.sources === 'object' ? st.sources : {};
+}
+const startupWarnings = [];
+// Coerces settings to the types of the defaults ("false" -> false, "8888" -> 8888); drops unknown keys.
+function cleanSettings(patch) {
+  const out = {};
+  if (!patch || typeof patch !== 'object') return out;
+  for (const k of Object.keys(DEFAULT_SETTINGS)) {
+    if (!(k in patch) || k === 'proxyPort') continue;
+    const def = DEFAULT_SETTINGS[k];
+    const v = patch[k];
+    if (typeof def === 'boolean') out[k] = v === true || v === 'true' || v === 1;
+    else if (typeof def === 'number') { if (Number.isFinite(+v)) out[k] = +v; }
+    else out[k] = v == null ? '' : String(v);
+  }
+  if ('duplicates' in out && !['first', 'sequence', 'cycle'].includes(out.duplicates)) delete out.duplicates;
+  return out;
 }
 let saveTimer = null;
 function saveState() {
@@ -89,7 +117,7 @@ function saveNow() {
 }
 
 // ---------------------------------------------------------------- helpers
-const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
+const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'http2-settings']);
 const DROP_ON_REPLAY = new Set([...HOP, 'content-encoding', 'content-length', 'alt-svc']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rid = () => crypto.randomBytes(5).toString('hex');
@@ -126,22 +154,30 @@ function decodeBody(buf, enc) {
   enc = String(enc || '').toLowerCase().trim();
   if (!buf.length || !enc || enc === 'identity') return buf;
   try {
-    if (enc === 'gzip' || enc === 'x-gzip') return zlib.gunzipSync(buf);
-    if (enc === 'br') return zlib.brotliDecompressSync(buf);
+    // capped: a small compressed response can expand to gigabytes ("zip bomb")
+    const o = { maxOutputLength: MAX_BODY };
+    if (enc === 'gzip' || enc === 'x-gzip') return zlib.gunzipSync(buf, o);
+    if (enc === 'br') return zlib.brotliDecompressSync(buf, o);
     if (enc === 'deflate') {
-      try { return zlib.inflateSync(buf); } catch { return zlib.inflateRawSync(buf); }
+      try { return zlib.inflateSync(buf, o); } catch { return zlib.inflateRawSync(buf, o); }
     }
-    if (enc === 'zstd' && zlib.zstdDecompressSync) return zlib.zstdDecompressSync(buf);
+    if (enc === 'zstd' && zlib.zstdDecompressSync) return zlib.zstdDecompressSync(buf, o);
   } catch {}
   return buf;
 }
 function isTextual(ct, buf) {
   if (/json|text|xml|javascript|ecmascript|html|css|x-www-form-urlencoded|graphql|csv|svg|yaml/i.test(ct || '')) return true;
   if (/image|audio|video|font|octet-stream|protobuf|wasm|zip|pdf/i.test(ct || '')) return false;
-  const sample = buf.subarray(0, 2048);
-  if (sample.includes(0)) return false;
-  return Buffer.from(sample.toString('utf8'), 'utf8').equals(sample) || sample.length === 2048;
+  return looksUtf8(buf);
 }
+// Valid UTF-8 without NUL bytes? Checks up to 64 KB; a multi-byte character cut at the end of the sample is fine.
+function looksUtf8(buf) {
+  let sample = buf.subarray(0, 65536);
+  if (sample.includes(0)) return false;
+  if (sample.length < buf.length) { let end = sample.length; while (end > sample.length - 4 && end > 0 && (sample[end - 1] & 0xc0) === 0x80) end--; sample = sample.subarray(0, Math.max(0, end - 1)); }
+  return Buffer.from(sample.toString('utf8'), 'utf8').equals(sample);
+}
+const roundTripsUtf8 = (buf) => Buffer.from(buf.toString('utf8'), 'utf8').equals(buf);
 function bodyView(buf, ct, textCap = 5 * 1024 * 1024) {
   if (!buf || !buf.length) return { size: 0, text: '' };
   if (isTextual(ct, buf)) {
@@ -169,6 +205,22 @@ function hostMatches(host, list) {
     });
 }
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0']);
+// True when host:port is one of HarFiddle's own listeners. Proxying there would hand any proxy client the
+// control API (with --lan: anyone on the network) or loop forever (a fallback/mapping pointing at the proxy).
+function isOwnPort(hostname, port) {
+  port = +port;
+  if (![proxyPort, browsePort, UI_PORT].includes(port)) return false;
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/^::ffff:/, '');
+  return LOCAL_HOSTS.has(h) || /^127\./.test(h) || h.endsWith('.localhost') || lanIps().includes(h) || h === os.hostname().toLowerCase();
+}
+function isOwnUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    return isOwnPort(u.hostname, u.port || (u.protocol === 'https:' ? 443 : 80));
+  } catch {
+    return false;
+  }
+}
 function localPort(urlStr) {
   try {
     const u = new URL(urlStr);
@@ -183,7 +235,11 @@ function localPort(urlStr) {
 const sseClients = new Set();
 function broadcast(event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const c of sseClients) c.write(msg);
+  for (const c of sseClients) {
+    // a stalled client (suspended tab, frozen window) would buffer forever; drop it, it reconnects and reloads
+    if (c.writableLength > 4 * 1024 * 1024) { sseClients.delete(c); c.destroy(); continue; }
+    c.write(msg);
+  }
 }
 
 const logBuf = [];
@@ -260,13 +316,43 @@ function attachProcess(s, sock) {
   raw.__proc.then((name) => {
     if (!name) return;
     s.process = name;
-    if (s.recorded && s.source !== 'pending') broadcast('session', summary(s));
+    if (s.recorded && sessions.has(s.id) && s.source !== 'pending') broadcast('session', summary(s));
   });
 }
 
 // ---------------------------------------------------------------- sessions
 const sessions = new Map();
 let nextSessionId = 1;
+let sessionBytes = 0;
+const bodyBytes = (s) => (s.reqBody ? s.reqBody.length : 0) + (s.resBody ? s.resBody.length : 0);
+function addSession(s) {
+  s._bytes = bodyBytes(s);
+  sessionBytes += s._bytes;
+  sessions.set(s.id, s);
+}
+function recount(s) {
+  if (!sessions.has(s.id)) return;
+  const now = bodyBytes(s);
+  sessionBytes += now - (s._bytes || 0);
+  s._bytes = now;
+}
+function dropSession(id) {
+  const s = sessions.get(id);
+  if (!s) return false;
+  sessionBytes -= s._bytes || 0;
+  sessions.delete(id);
+  return true;
+}
+// Keeps the capture within MAX_SESSIONS and MAX_SESSION_BYTES by dropping the oldest sessions.
+function trimSessions() {
+  const dropped = [];
+  for (const id of sessions.keys()) {
+    if (sessions.size <= MAX_SESSIONS && sessionBytes <= MAX_SESSION_BYTES) break;
+    dropSession(id);
+    dropped.push(id);
+  }
+  if (dropped.length) broadcast('removed', { ids: dropped });
+}
 
 function newSession(ctx) {
   const s = {
@@ -296,18 +382,19 @@ function newSession(ctx) {
   attachProcess(s, ctx.sock);
   s.timers.ClientBeginRequest = s.ts;
   s.timers.ClientDoneRequest = Date.now();
-  if (ctx.silent || !settings.capture) return s; // not recorded
-  sessions.set(s.id, s);
-  if (sessions.size > MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
+  if (!settings.capture) return s; // not recorded
+  addSession(s);
+  trimSessions();
   s.recorded = true;
   broadcast('session', summary(s));
   return s;
 }
 function finishSession(s, patch) {
   Object.assign(s, patch);
+  if (s.recorded) { recount(s); if ('resBody' in patch) trimSessions(); }
   s.duration = Date.now() - s.ts;
   if (s.timers && !s.timers.ClientDoneResponse) s.timers.ClientDoneResponse = Date.now();
-  if (s.recorded) broadcast('session', summary(s));
+  if (s.recorded && sessions.has(s.id)) broadcast('session', summary(s)); // removed sessions stay removed
 }
 function summary(s) {
   let host = '', pathq = s.url;
@@ -355,7 +442,7 @@ function sessionToHarEntry(s) {
   let qs = [];
   try { qs = [...new URL(s.url).searchParams].map(([name, value]) => ({ name, value })); } catch {}
   const resCt = hdr(s.resHeaders, 'content-type') || '';
-  const textual = isTextual(resCt, s.resBody);
+  const textual = isTextual(resCt, s.resBody) && roundTripsUtf8(s.resBody);
   const entry = {
     startedDateTime: new Date(s.ts).toISOString(),
     time: s.duration || 0,
@@ -377,7 +464,10 @@ function sessionToHarEntry(s) {
     ...(s.mark ? { _harfiddleMark: s.mark } : {}),
     ...(s.process ? { _harfiddleProcess: s.process } : {}),
   };
-  if (s.reqBody.length) entry.request.postData = { mimeType: hdr(s.reqHeaders, 'content-type') || '', text: s.reqBody.toString('utf8') };
+  if (s.reqBody.length) {
+    const text = roundTripsUtf8(s.reqBody);
+    entry.request.postData = { mimeType: hdr(s.reqHeaders, 'content-type') || '', text: s.reqBody.toString(text ? 'utf8' : 'base64'), ...(text ? {} : { _encoding: 'base64' }) };
+  }
   return entry;
 }
 
@@ -388,10 +478,29 @@ function newRule(r) {
     headers: [], body: '', mimeType: '', delay: null, harTime: 0, reqBody: null, comment: '', hits: 0, action: '', once: false, ...r,
   };
 }
+// A rule must produce a final response; 1xx (e.g. a recorded 101 WebSocket switch) can't be replayed.
+const validStatus = (n) => (Number.isInteger(+n) && +n >= 200 && +n <= 599 ? +n : null);
+// Makes any rule object safe to serve, whatever file or request it came from.
+function normalizeRule(r) {
+  const out = newRule(r);
+  out.id = typeof out.id === 'string' && /^[a-z0-9]{1,40}$/i.test(out.id) ? out.id : rid();
+  out.status = validStatus(out.status) || 200;
+  out.method = String(out.method || '*').toUpperCase();
+  out.match = String(out.match ?? '');
+  out.action = String(out.action ?? '');
+  out.source = String(out.source || 'custom');
+  out.headers = Array.isArray(out.headers) ? out.headers.filter((h) => Array.isArray(h) && h.length >= 2).map(([k, v]) => [String(k), String(v)]) : [];
+  out.body = typeof out.body === 'string' ? out.body : '';
+  out.enabled = out.enabled !== false;
+  out.delay = out.delay == null || out.delay === '' || !Number.isFinite(+out.delay) ? null : Math.max(0, +out.delay);
+  return out;
+}
+const harPairs = (hs) => (Array.isArray(hs) ? hs : []).filter((h) => h && typeof h.name === 'string' && h.name).map((h) => [h.name, String(h.value ?? '')]);
+
 function ruleFromHar(entry, source) {
   const req = entry.request || {};
   const res = entry.response || {};
-  if (!/^https?:\/\//i.test(req.url || '') || !res.status) return null;
+  if (!/^https?:\/\//i.test(req.url || '') || !validStatus(res.status)) return null;
   const c = res.content || {};
   let body = Buffer.alloc(0);
   if (c.text != null) body = c.encoding === 'base64' ? Buffer.from(c.text, 'base64') : Buffer.from(String(c.text), 'utf8');
@@ -401,9 +510,9 @@ function ruleFromHar(entry, source) {
     source,
     method: String(req.method || 'GET').toUpperCase(),
     match: 'EXACT:' + req.url,
-    status: res.status,
+    status: validStatus(res.status) || 200,
     statusText: res.statusText || '',
-    headers: (res.headers || []).filter((h) => h.name && !h.name.startsWith(':')).map((h) => [h.name, String(h.value)]),
+    headers: harPairs(res.headers).filter(([k]) => !k.startsWith(':')),
     body: body.toString('base64'),
     mimeType: c.mimeType || '',
     harTime: Math.round(pos(t.send) + pos(t.wait) + pos(t.receive)) || Math.round(pos(entry.time)),
@@ -449,48 +558,51 @@ function importSessions(name, text) {
   const har = JSON.parse(text);
   const entries = har && har.log && har.log.entries;
   if (!Array.isArray(entries)) throw new Error('Not a HAR file (missing log.entries)');
-  const pairs = (hs) => (hs || []).filter((h) => h && h.name).map((h) => [h.name, String(h.value)]);
+  const pairs = harPairs;
   let added = 0;
   for (const e of entries) {
-    const req = e.request || {};
-    const res = e.response || {};
-    if (!req.url) continue;
-    const c = res.content || {};
-    let body = Buffer.alloc(0);
-    if (c.text != null) body = c.encoding === 'base64' ? Buffer.from(c.text, 'base64') : Buffer.from(String(c.text), 'utf8');
-    const reqHeaders = pairs(req.headers);
-    const resHeaders = pairs(res.headers);
-    if (!hdr(resHeaders, 'content-type') && c.mimeType) resHeaders.push(['content-type', c.mimeType]);
-    const s = {
-      id: nextSessionId++,
-      ts: Date.parse(e.startedDateTime) || Date.now(),
-      method: String(req.method || 'GET').toUpperCase(),
-      url: req.url,
-      mode: 'har',
-      httpVersion: String(req.httpVersion || '1.1').replace(/^HTTP\//i, ''),
-      clientIp: '',
-      reqHeaders,
-      reqBody: req.postData && req.postData.text != null ? Buffer.from(String(req.postData.text), 'utf8') : Buffer.alloc(0),
-      status: res.status || 0,
-      statusText: res.statusText || '',
-      resHeaders,
-      resBody: body,
-      resSize: res.bodySize > 0 ? res.bodySize : body.length,
-      source: 'har',
-      ruleId: null,
-      upstream: null,
-      error: res.status ? null : res._error || 'No response was recorded for this request',
-      note: `Imported from ${name}`,
-      duration: Math.round(e.time > 0 ? e.time : 0),
-      recorded: true,
-      timers: harTimers(Date.parse(e.startedDateTime) || Date.now(), e.timings || {}),
-      mark: MARKS.has(e._harfiddleMark) ? e._harfiddleMark : null,
-      process: typeof e._harfiddleProcess === 'string' ? e._harfiddleProcess : null,
-    };
-    sessions.set(s.id, s);
-    added++;
+    if (!e || typeof e !== 'object') continue;
+    try {
+      const req = e.request || {};
+      const res = e.response || {};
+      if (typeof req.url !== 'string' || !req.url) continue;
+      const c = res.content || {};
+      let body = Buffer.alloc(0);
+      if (c.text != null) body = c.encoding === 'base64' ? Buffer.from(c.text, 'base64') : Buffer.from(String(c.text), 'utf8');
+      const reqHeaders = pairs(req.headers);
+      const resHeaders = pairs(res.headers);
+      if (!hdr(resHeaders, 'content-type') && c.mimeType) resHeaders.push(['content-type', c.mimeType]);
+      const s = {
+        id: nextSessionId++,
+        ts: Date.parse(e.startedDateTime) || Date.now(),
+        method: String(req.method || 'GET').toUpperCase(),
+        url: req.url,
+        mode: 'har',
+        httpVersion: String(req.httpVersion || '1.1').replace(/^HTTP\//i, ''),
+        clientIp: '',
+        reqHeaders,
+        reqBody: req.postData && req.postData.text != null ? Buffer.from(String(req.postData.text), req.postData._encoding === 'base64' ? 'base64' : 'utf8') : Buffer.alloc(0),
+        status: Math.trunc(+res.status) || 0,
+        statusText: res.statusText || '',
+        resHeaders,
+        resBody: body,
+        resSize: res.bodySize > 0 ? res.bodySize : body.length,
+        source: 'har',
+        ruleId: null,
+        upstream: null,
+        error: res.status ? null : res._error || 'No response was recorded for this request',
+        note: `Imported from ${name}`,
+        duration: Math.round(e.time > 0 ? e.time : 0),
+        recorded: true,
+        timers: harTimers(Date.parse(e.startedDateTime) || Date.now(), e.timings || {}),
+        mark: MARKS.has(e._harfiddleMark) ? e._harfiddleMark : null,
+        process: typeof e._harfiddleProcess === 'string' ? e._harfiddleProcess : null,
+      };
+      addSession(s);
+      added++;
+    } catch {} // skip malformed entries
   }
-  while (sessions.size > MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
+  trimSessions();
   broadcast('reload', {});
   log(`Imported ${added} sessions from ${name}`);
   return { name, added };
@@ -507,7 +619,8 @@ function importHar(name, text) {
   const added = [];
   let skipped = 0;
   for (const e of sorted) {
-    const r = ruleFromHar(e, name);
+    let r = null;
+    try { r = e && typeof e === 'object' ? ruleFromHar(e, name) : null; } catch {} // skip malformed entries
     if (r) added.push(r);
     else skipped++;
   }
@@ -579,15 +692,26 @@ function findRule(method, url, body, direct) {
   }
   if (!matches.length) return null;
   if (matches.length === 1 || settings.duplicates === 'first') return matches[0];
+  // Remember which of these rules already answered (not a counter), so rules switching off (match only once)
+  // or being edited don't make the sequence skip one.
   const k = method + ' ' + reqKey;
-  const n = seq.get(k) || 0;
-  seq.set(k, n + 1);
-  return settings.duplicates === 'cycle' ? matches[n % matches.length] : matches[Math.min(n, matches.length - 1)];
+  let played = seq.get(k);
+  if (!played) seq.set(k, (played = new Set()));
+  let next = matches.find((r) => !played.has(r.id));
+  if (!next) {
+    if (settings.duplicates === 'cycle') { played.clear(); next = matches[0]; }
+    else next = matches[matches.length - 1];
+  }
+  played.add(next.id);
+  return next;
 }
 
 // ---------------------------------------------------------------- response sinks
 function resSink(res) {
+  let closed = false;
+  res.once('close', () => (closed = true));
   return {
+    get closed() { return closed && !res.writableFinished; },
     writeHead(st, msg, flat) {
       if (msg && /^[\t\x20-\x7e]*$/.test(msg)) res.writeHead(st, msg, flat);
       else res.writeHead(st, flat);
@@ -605,6 +729,7 @@ function collectSink() {
   let resolve;
   const o = {
     sent: false,
+    closed: false,
     done: new Promise((r) => (resolve = r)),
     writeHead() { o.sent = true; },
     write: () => true,
@@ -634,13 +759,16 @@ function directAdjust(pairs, ctx) {
 }
 
 function respondSimple(ctx, s, status, body, patch, extra = []) {
-  const buf = Buffer.from(body);
+  const noBody = status === 204 || status === 304 || status < 200;
+  const buf = noBody ? Buffer.alloc(0) : Buffer.from(body);
   const ct = /^\s*[{[]/.test(body) ? 'application/json' : /^\s*</.test(body) ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8';
-  const pairs = directAdjust([['Content-Type', ct], ['Content-Length', String(buf.length)], ['X-HarFiddle', patch.source], ...extra], ctx);
+  const pairs = directAdjust([...(noBody ? [] : [['Content-Type', ct], ['Content-Length', String(buf.length)]]), ['X-HarFiddle', patch.source], ...extra], ctx);
   try {
     ctx.sink.writeHead(status, null, flatHeaders(pairs));
-    ctx.sink.end(ctx.method === 'HEAD' ? undefined : buf);
-  } catch {}
+    ctx.sink.end(ctx.method === 'HEAD' || noBody ? undefined : buf);
+  } catch {
+    ctx.sink.destroy();
+  }
   finishSession(s, { status, resHeaders: pairs, resBody: buf, resSize: buf.length, ...patch });
 }
 
@@ -659,10 +787,11 @@ const FILE_TYPES = { '.json': 'application/json', '.html': 'text/html; charset=u
 //   (empty) recorded response · *200/*404… status only · *delay:ms then go to server · *drop · *reset
 //   *redir:url · http(s)://url (map remote, REGEX $1 groups allowed) · /local/file/path
 // AutoResponder answers in ~1 ms, often before the client-process lookup (~50 ms) finishes, and the client
-// may disconnect right after. On a connection's first request, wait for the lookup (at most 150 ms).
+// may disconnect right after. On a connection's first request, wait for the lookup: ~50 ms normally, capped at
+// 400 ms for when the Mac is busy and lsof is slow.
 async function waitForProcess(ctx) {
   const raw = ctx.sock && (ctx.sock.__raw || ctx.sock);
-  if (raw && raw.__proc && raw.__procName === undefined) await Promise.race([raw.__proc, sleep(150)]);
+  if (raw && raw.__proc && raw.__procName === undefined) await Promise.race([raw.__proc, sleep(400)]);
 }
 
 async function applyRule(ctx, s, rule) {
@@ -671,10 +800,15 @@ async function applyRule(ctx, s, rule) {
   s.ruleId = rule.id;
   const action = String(rule.action || '').trim();
   if (!action) return serveRule(ctx, s, rule);
-  const subst = (str) => {
+  const subst = (str, forPath) => {
     const re = /^regex:/i.test(rule.match || '') && rule._c && rule._c.re;
     const m = re && ctx.url.match(re);
-    return m ? str.replace(/\$(\d)/g, (_, n) => m[+n] ?? '') : str;
+    if (!m) return str;
+    return str.replace(/\$(\d)/g, (_, n) => {
+      let v = m[+n] ?? '';
+      if (forPath) { try { v = decodeURIComponent(v.split('?')[0]); } catch {} }
+      return v;
+    });
   };
   let m;
   if (/^\*drop$/i.test(action)) {
@@ -687,6 +821,7 @@ async function applyRule(ctx, s, rule) {
   }
   if ((m = action.match(/^\*delay:(\d+)$/i))) {
     await sleep(Math.min(+m[1], 120000));
+    if (ctx.sink.closed) return finishSession(s, { source: 'aborted', note: 'The client gave up during the AutoResponder delay' });
     s.note = `Held ${m[1]} ms by AutoResponder, then sent to the server`;
     const up = upstreamFor(ctx);
     if (!up) return respondSimple(ctx, s, 502, 'HarFiddle: *delay rule matched but there is no upstream for a direct request\n', { source: 'blocked' });
@@ -697,6 +832,7 @@ async function applyRule(ctx, s, rule) {
     return respondSimple(ctx, s, 307, '', { source: 'auto', note: `Redirected to ${to}` }, [['Location', to]]);
   }
   if ((m = action.match(/^\*(\d{3})\b/))) {
+    if (!validStatus(m[1])) return respondSimple(ctx, s, 500, `HarFiddle: "${action}" is not a valid status (use 200-599).\n`, { source: 'error', error: 'Invalid status in rule action' });
     return respondSimple(ctx, s, +m[1], `HarFiddle: HTTP/${m[1]} returned by an AutoResponder rule.\n`, { source: 'auto' });
   }
   if (/^https?:\/\//i.test(action)) {
@@ -704,8 +840,15 @@ async function applyRule(ctx, s, rule) {
     s.note = `AutoResponder mapped this request to ${target}`;
     return forward(ctx, s, target);
   }
-  const file = subst(action).replace(/^~(?=\/)/, os.homedir());
-  if (path.isAbsolute(file)) {
+  const file = path.resolve(subst(action, true).replace(/^~(?=\/)/, os.homedir()));
+  if (path.isAbsolute(action.replace(/^~(?=\/)/, '/'))) {
+    // with $1/$2, the request picks part of the path: it must stay inside the folder the rule names
+    if (/\$\d/.test(action)) {
+      const base = path.resolve(action.slice(0, action.search(/\$\d/)).replace(/^~(?=\/)/, os.homedir()).replace(/[^/]*$/, ''));
+      if (file !== base && !file.startsWith(base + path.sep)) {
+        return respondSimple(ctx, s, 403, 'HarFiddle: that path is outside the folder this rule serves.\n', { source: 'auto', note: 'Blocked path outside the rule folder' });
+      }
+    }
     let buf;
     try { buf = fs.readFileSync(file); } catch (e) {
       return respondSimple(ctx, s, 404, `HarFiddle: AutoResponder file not found: ${file}\n`, { source: 'auto', error: e.message });
@@ -720,6 +863,7 @@ async function applyRule(ctx, s, rule) {
 async function serveRule(ctx, s, rule) {
   const delay = rule.delay != null && rule.delay !== '' ? +rule.delay : settings.simulateLatency ? rule.harTime || 0 : 0;
   if (delay > 0) await sleep(Math.min(delay, 120000));
+  if (ctx.sink.closed) return finishSession(s, { source: 'aborted', ruleId: rule.id, note: 'The client gave up during the delay' });
   const body = Buffer.from(rule.body || '', 'base64');
   const noBody = rule.status === 204 || rule.status === 304 || rule.status < 200;
   let pairs = rule.headers.filter(([k]) => !DROP_ON_REPLAY.has(k.toLowerCase()) && !k.startsWith(':'));
@@ -730,6 +874,7 @@ async function serveRule(ctx, s, rule) {
     ctx.sink.writeHead(rule.status, rule.statusText, flatHeaders(pairs));
     ctx.sink.end(noBody || ctx.method === 'HEAD' ? undefined : body);
   } catch (e) {
+    ctx.sink.destroy(); // never leave the client waiting on a half-written response
     return finishSession(s, { source: 'error', error: 'Failed to write AutoResponse: ' + e.message, ruleId: rule.id });
   }
   finishSession(s, { status: rule.status, statusText: rule.statusText, resHeaders: pairs, resBody: noBody ? Buffer.alloc(0) : body, resSize: body.length, source: 'auto', ruleId: rule.id, note: [s.note, delay ? `delayed ${delay} ms` : ''].filter(Boolean).join(' · ') || null });
@@ -740,6 +885,10 @@ function forward(ctx, s, upstreamUrl) {
     let target;
     try { target = new URL(upstreamUrl); } catch {
       respondSimple(ctx, s, 400, `Bad URL: ${upstreamUrl}`, { source: 'error', error: 'Bad URL' });
+      return resolve();
+    }
+    if (isOwnUrl(target.href)) {
+      respondSimple(ctx, s, 508, `HarFiddle: refusing to forward to its own port (${target.host}); this would loop.\n`, { source: 'error', error: 'Loop: the request was forwarded to HarFiddle itself' });
       return resolve();
     }
     const secure = target.protocol === 'https:';
@@ -774,6 +923,7 @@ function forward(ctx, s, upstreamUrl) {
     ctx.sink.onClose(() => { if (!finished) { clientGone = true; up.destroy(); } });
 
     up.on('response', (upRes) => {
+      up.setTimeout(0); // long polls / event streams may stay quiet for minutes once they've started
       T.ServerBeginResponse = T.ClientBeginResponse = Date.now();
       const resPairs = directAdjust(rawPairs(upRes.rawHeaders).filter(([k]) => !HOP.has(k.toLowerCase())), ctx);
       try { ctx.sink.writeHead(upRes.statusCode, upRes.statusMessage, flatHeaders(resPairs)); } catch {}
@@ -796,9 +946,9 @@ function forward(ctx, s, upstreamUrl) {
         finishSession(s, {
           status: upRes.statusCode, statusText: upRes.statusMessage, resHeaders: resPairs,
           resBody: decodeBody(raw, hdr(resPairs, 'content-encoding')), resSize: size,
-          source: err && !clientGone ? 'error' : 'live', error: err && !clientGone ? err.message : null,
-          ...(clientGone ? { note: 'The client cancelled the request before the response finished' } : {}),
-          note: size > MAX_BODY ? `body truncated in capture (${size} bytes)` : s.note,
+          source: clientGone ? 'aborted' : err ? 'error' : 'live', error: err && !clientGone ? err.message : null,
+          note: clientGone ? 'The client cancelled the request before the response finished'
+            : size > MAX_BODY ? `body truncated in capture (${size} bytes)` : s.note,
         });
         resolve();
       };
@@ -824,7 +974,7 @@ function forward(ctx, s, upstreamUrl) {
 
 async function handle(ctx) {
   const s = newSession(ctx);
-  if (ctx.silent) return forward(ctx, s, ctx.url);
+  ctx.session = s;
 
   const direct = ctx.mode === 'direct';
   if (direct && settings.directFriendly && ctx.method === 'OPTIONS' && hdr(ctx.reqPairs, 'access-control-request-method')) {
@@ -880,40 +1030,80 @@ function readBody(req) {
 function classify(req) {
   const sock = req.socket;
   let mode = 'proxy', url;
-  if (sock.__target) url = `${sock.encrypted ? 'https' : 'http'}://${req.headers.host || sock.__target}${req.url}`;
+  if (sock.__target) {
+    const tPort = String(sock.__target).match(/:(\d+)$/);
+    let host = req.headers.host || sock.__target;
+    if (!/:\d+$/.test(host) && !/^\[.*\]$/.test(host) && tPort && tPort[1] !== (sock.encrypted ? '443' : '80')) host += ':' + tPort[1];
+    url = `${sock.encrypted ? 'https' : 'http'}://${host}${req.url}`;
+  }
   else if (/^https?:\/\//i.test(req.url)) url = req.url;
   else { mode = 'direct'; url = `http://${req.headers.host || 'localhost:' + proxyPort}${req.url}`; }
-  const lp = localPort(url);
-  if (mode === 'proxy' && lp === proxyPort && !sock.encrypted) mode = 'direct';
-  return { mode, url, silent: mode === 'proxy' && lp === UI_PORT };
+  // an absolute URL that names the proxy itself is really a direct request
+  if (mode === 'proxy' && !sock.__target && localPort(url) === proxyPort) {
+    mode = 'direct';
+    try { const u = new URL(url); url = `http://localhost:${proxyPort}${u.pathname}${u.search}`; } catch {}
+  }
+  return { mode, url, own: mode === 'proxy' && isOwnUrl(url) };
 }
 
-async function onProxyRequest(req, res) {
+async function onProxyRequest(req, res, presetBody) {
   const t0 = Date.now();
   if (req.socket.__requests != null) {
     req.socket.__requests++;
     hostWorked.set(req.socket.__host, t0);
   }
-  const { mode, url, silent } = classify(req);
-  let body;
-  try { body = await readBody(req); } catch { return; }
-  await handle({
-    method: req.method, url, mode, silent, body, t0, sock: req.socket,
-    reqPairs: rawPairs(req.rawHeaders), httpVersion: req.httpVersion,
-    clientIp: req.socket.remoteAddress, sink: resSink(res),
-  });
+  let ctx;
+  try {
+    const { mode, url, own } = classify(req);
+    if (own) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      return res.end('HarFiddle does not proxy requests to its own ports.\n');
+    }
+    const body = presetBody !== undefined ? presetBody : await readBody(req);
+    ctx = {
+      method: req.method, url, mode, body, t0, sock: req.socket,
+      reqPairs: rawPairs(req.rawHeaders), httpVersion: req.httpVersion,
+      clientIp: req.socket.remoteAddress, sink: resSink(res),
+    };
+    await handle(ctx);
+  } catch (e) {
+    // anything unexpected: answer instead of leaving the client hanging
+    log(`Internal error while handling ${req.method} ${req.url}: ${e.message}`);
+    try {
+      if (!res.headersSent) { res.writeHead(500, { 'Content-Type': 'text/plain' }); res.end(`HarFiddle internal error: ${e.message}\n`); }
+      else res.destroy();
+    } catch {}
+    if (ctx && ctx.session && ctx.session.source === 'pending') finishSession(ctx.session, { status: 500, source: 'error', error: 'Internal error: ' + e.message });
+  }
 }
 
 // WebSocket & other upgrades: pipe through (not inspected frame-by-frame)
 function onUpgrade(req, sock, head) {
-  let { mode, url } = classify(req);
-  if (mode === 'direct') {
-    const fb = String(settings.fallbackUpstream || '').trim().replace(/\/+$/, '');
-    if (!fb) return sock.destroy();
-    const u = new URL(url);
-    url = (/^https?:\/\//i.test(fb) ? fb : 'https://' + fb) + u.pathname + u.search;
+  sock.on('error', () => {});
+  if (!/\bwebsocket\b/i.test(String(req.headers.upgrade || ''))) {
+    // Other upgrade offers (e.g. "Upgrade: h2c" from curl --http2 or Java's HttpClient) are optional:
+    // ignore the offer and answer as a normal HTTP/1.1 request, so rules and the inspector still work.
+    const res = new http.ServerResponse(req);
+    res.shouldKeepAlive = false;
+    res.assignSocket(sock);
+    res.on('finish', () => sock.end());
+    return onProxyRequest(req, res, head || Buffer.alloc(0));
   }
-  const t = new URL(url.replace(/^ws/, 'http'));
+  let mode, url, t;
+  try {
+    ({ mode, url } = classify(req));
+    if (isOwnUrl(url)) return sock.destroy();
+    if (mode === 'direct') {
+      const fb = String(settings.fallbackUpstream || '').trim().replace(/\/+$/, '');
+      if (!fb) return sock.destroy();
+      const u = new URL(url);
+      url = (/^https?:\/\//i.test(fb) ? fb : 'https://' + fb) + u.pathname + u.search;
+      if (isOwnUrl(url)) return sock.destroy();
+    }
+    t = new URL(url.replace(/^ws/, 'http'));
+  } catch {
+    return sock.destroy();
+  }
   const secure = t.protocol === 'https:';
   const s = newSession({ method: req.method, url, mode, reqPairs: rawPairs(req.rawHeaders), httpVersion: req.httpVersion, clientIp: sock.remoteAddress, sock });
   const port = +(t.port || (secure ? 443 : 80));
@@ -944,8 +1134,8 @@ function onUpgrade(req, sock, head) {
   const close = (err) => {
     if (closed) return;
     closed = true;
-    if (err && !s.status) finishSession(s, { source: 'error', error: err.message });
-    else if (s.status) finishSession(s, { note: `WebSocket closed — ${sock.bytesRead} bytes sent, ${up.bytesRead} bytes received` });
+    if (!s.status) finishSession(s, { source: 'error', error: err ? err.message : 'The connection closed before the server answered the WebSocket request' });
+    else finishSession(s, { note: `WebSocket closed: ${sock.bytesRead} bytes sent, ${up.bytesRead} bytes received` });
     up.destroy();
     sock.destroy();
   };
@@ -953,6 +1143,9 @@ function onUpgrade(req, sock, head) {
   sock.on('error', close);
   up.on('close', () => close());
   sock.on('close', () => close());
+  // either side hanging up ends the tunnel (otherwise a half-closed socket keeps it open)
+  up.on('end', () => close());
+  sock.on('end', () => close());
 }
 
 // CONNECT: decrypt TLS with our CA, or tunnel it untouched.
@@ -989,6 +1182,9 @@ function onConnect(req, sock, head) {
   const m = req.url.match(/^\[?([^\]]+?)\]?:(\d+)$/) || [null, req.url, '443'];
   const host = m[1].toLowerCase();
   const port = +m[2];
+  sock.on('error', () => {});
+  if (!(port >= 1 && port <= 65535) || !host || /[\s/]/.test(host)) { try { sock.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {} return; }
+  if (isOwnPort(host, port)) { try { sock.end('HTTP/1.1 403 Forbidden\r\n\r\n'); } catch {} return; }
   // From system capture unless it came in on the Browse port or capture is off (a client chose this proxy).
   const explicit = sock.localPort === browsePort || !systemProxyOn;
   sock.on('error', () => {});
@@ -1092,9 +1288,13 @@ async function systemProxyStatus() {
   }
 }
 let proxyToggle = Promise.resolve();
+let togglingProxy = false;
 function setSystemProxy(on) {
   // serialize clicks so two toggles never interleave their networksetup calls
-  const next = proxyToggle.then(() => applySystemProxy(on));
+  const next = proxyToggle.then(async () => {
+    togglingProxy = true;
+    try { await applySystemProxy(on); } finally { togglingProxy = false; }
+  });
   proxyToggle = next.catch(() => {});
   return next;
 }
@@ -1103,11 +1303,14 @@ async function applySystemProxy(on) {
   if (on === systemProxyOn) return;
   if (on) {
     const [services] = await Promise.all([networkServices(), checkCaTrust()]);
-    const backup = fs.existsSync(SYSPROXY_BACKUP) ? JSON.parse(fs.readFileSync(SYSPROXY_BACKUP, 'utf8')) : {};
+    const existing = readBackup();
+    if (backupOwnedByOther(existing)) throw new Error('Another copy of HarFiddle is capturing system traffic right now. Quit it first.');
+    const backup = existing || {};
     await Promise.all(services.filter((svc) => !backup[svc]).map(async (svc) => {
       const [web, secure] = await Promise.all([run('networksetup', ['-getwebproxy', svc]), run('networksetup', ['-getsecurewebproxy', svc])]);
       backup[svc] = { web: parseProxyInfo(web), secure: parseProxyInfo(secure) };
     }));
+    backup._owner = process.pid;
     fs.writeFileSync(SYSPROXY_BACKUP, JSON.stringify(backup));
     systemProxyOn = true; // before macOS starts sending traffic, so the first connections count as system traffic
     const errors = [];
@@ -1142,39 +1345,57 @@ async function applySystemProxy(on) {
 // Puts back what each network service had before capture started: a proxy that was on gets its old host and
 // port back; one that was off is turned off (its greyed-out address doesn't matter, and re-setting it would
 // briefly switch it on).
-async function restoreSystemProxy() {
-  if (!fs.existsSync(SYSPROXY_BACKUP)) return;
-  const backup = JSON.parse(fs.readFileSync(SYSPROXY_BACKUP, 'utf8'));
-  const kinds = [['web', '-setwebproxy', '-setwebproxystate'], ['secure', '-setsecurewebproxy', '-setsecurewebproxystate']];
-  for (const [svc, b] of Object.entries(backup)) {
-    for (const [kind, set, state] of kinds) {
-      const p = b[kind];
-      try {
-        if (p.enabled && p.server) await run('networksetup', [set, svc, p.server, String(+p.port || 8080)]);
-        else await run('networksetup', [state, svc, 'off']);
-      } catch {}
-    }
-  }
-  try { fs.unlinkSync(SYSPROXY_BACKUP); } catch {}
+// The backup records which HarFiddle process turned capture on (`_owner`), so a second copy starting up
+// never undoes a capture that another running copy owns.
+function readBackup() {
+  try { return JSON.parse(fs.readFileSync(SYSPROXY_BACKUP, 'utf8')); } catch { return null; }
 }
-function restoreSystemProxySync() {
-  if (!fs.existsSync(SYSPROXY_BACKUP)) return;
-  try {
-    const backup = JSON.parse(fs.readFileSync(SYSPROXY_BACKUP, 'utf8'));
-    for (const [svc, b] of Object.entries(backup)) {
-      for (const [kind, set, state] of [['web', '-setwebproxy', '-setwebproxystate'], ['secure', '-setsecurewebproxy', '-setsecurewebproxystate']]) {
-        const p = b[kind];
-        try {
-          if (p.enabled && p.server) execFileSync('networksetup', [set, svc, p.server, String(+p.port || 8080)], { timeout: 10000 });
-          else execFileSync('networksetup', [state, svc, 'off'], { timeout: 10000 });
-        } catch {}
-      }
+function backupOwnedByOther(backup) {
+  const pid = backup && backup._owner;
+  if (!pid || pid === process.pid) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+const PROXY_KINDS = [['web', '-setwebproxy', '-setwebproxystate'], ['secure', '-setsecurewebproxy', '-setsecurewebproxystate']];
+// The commands that put one network service back the way the backup says it was.
+function restoreCommands(backup) {
+  const cmds = [];
+  for (const [svc, b] of Object.entries(backup || {})) {
+    if (svc.startsWith('_') || !b) continue;
+    for (const [kind, set, state] of PROXY_KINDS) {
+      const p = b[kind] || {};
+      cmds.push(p.enabled && p.server ? [set, svc, p.server, String(+p.port || 8080)] : [state, svc, 'off']);
     }
-    fs.unlinkSync(SYSPROXY_BACKUP);
-    console.log('System proxy settings restored.');
-  } catch (e) {
-    console.error('Could not restore system proxy:', e.message);
   }
+  return cmds;
+}
+// Puts back what each network service had before capture started: a proxy that was on gets its old host and
+// port back; one that was off is turned off (its greyed-out address doesn't matter, and re-setting it would
+// briefly switch it on). The backup is only deleted once every service was restored.
+async function restoreSystemProxy() {
+  const backup = readBackup();
+  let failed = 0;
+  for (const args of restoreCommands(backup)) {
+    try { await run('networksetup', args); } catch { failed++; }
+  }
+  // no backup (or it didn't cover every service) but macOS still points at us: switch our proxy off everywhere
+  if (await systemProxyStatus()) {
+    for (const svc of await networkServices().catch(() => [])) {
+      for (const [, , state] of PROXY_KINDS) { try { await run('networksetup', [state, svc, 'off']); } catch { failed++; } }
+    }
+  }
+  if (!failed) { try { fs.unlinkSync(SYSPROXY_BACKUP); } catch {} }
+  else log(`Could not restore ${failed} proxy setting(s); the backup in ${SYSPROXY_BACKUP} was kept so the next start retries.`);
+}
+// Synchronous version for process exit and startup after a crash.
+function restoreSystemProxySync() {
+  const backup = readBackup();
+  if (!backup || backupOwnedByOther(backup)) return;
+  let failed = 0;
+  for (const args of restoreCommands(backup)) {
+    try { execFileSync('networksetup', args, { timeout: 10000 }); } catch { failed++; }
+  }
+  if (!failed) { try { fs.unlinkSync(SYSPROXY_BACKUP); } catch {} console.log('System proxy settings restored.'); }
+  else console.error(`Could not restore ${failed} system proxy setting(s); will retry on the next start.`);
 }
 
 function launchBrowser(which, startUrl) {
@@ -1187,7 +1408,7 @@ function launchBrowser(which, startUrl) {
     '--ignore-certificate-errors',
     '--no-first-run', '--no-default-browser-check',
   ];
-  if (startUrl) args.push(startUrl);
+  if (startUrl && /^https?:\/\/[^\s]+$/i.test(String(startUrl))) args.push(String(startUrl));
   return run('open', args);
 }
 
@@ -1200,6 +1421,11 @@ function sendJson(res, status, obj) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': b.length, 'Cache-Control': 'no-store' });
   res.end(b);
 }
+// Parses a JSON object body; anything else (null, arrays, numbers) becomes {}.
+async function jsonObject(req) {
+  const v = await jsonBody(req);
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+}
 async function jsonBody(req) {
   const b = await readBody(req);
   return b.length ? JSON.parse(b.toString('utf8')) : {};
@@ -1209,7 +1435,23 @@ function lanIps() {
 }
 let caTrusted = null;
 // macOS trust can change behind our back (Keychain Access), so re-check while capturing
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, t] of tlsErrorSeen) if (now - t > 60000) tlsErrorSeen.delete(k);
+  for (const [k, t] of hostWorked) if (now - t > 10 * 60000) hostWorked.delete(k);
+  for (const [k, list] of quickCloses) if (!list.some((t) => now - t < 60000)) quickCloses.delete(k);
+  for (const [k, until] of rejectedHosts) if (until < now) rejectedHosts.delete(k);
+}, 60000).unref();
 setInterval(async () => {
+  // Someone may have changed the proxy in System Settings: follow what macOS actually does.
+  if (!togglingProxy && process.platform === 'darwin') {
+    const active = await systemProxyStatus();
+    if (!togglingProxy && active !== systemProxyOn) {
+      systemProxyOn = active;
+      log(active ? 'macOS is using HarFiddle as its proxy' : 'macOS is no longer using HarFiddle as its proxy (changed outside HarFiddle)');
+      broadcast('info', await info());
+    }
+  }
   if (!systemProxyOn) return;
   const before = caTrusted;
   if ((await checkCaTrust()) !== before) {
@@ -1245,8 +1487,13 @@ async function api(req, res, u) {
   if (p === '/api/info' && m === 'GET') return sendJson(res, 200, await info());
   if (p === '/api/settings' && m === 'GET') return sendJson(res, 200, settings);
   if (p === '/api/settings' && m === 'PUT') {
-    const patch = await jsonBody(req);
-    for (const k of Object.keys(DEFAULT_SETTINGS)) if (k in patch && k !== 'proxyPort') settings[k] = patch[k];
+    const patch = cleanSettings(await jsonObject(req));
+    if (patch.fallbackUpstream) {
+      const fb = /^https?:\/\//i.test(patch.fallbackUpstream) ? patch.fallbackUpstream : 'https://' + patch.fallbackUpstream;
+      try { new URL(fb); } catch { return sendJson(res, 400, { error: 'The fallback upstream is not a valid URL' }); }
+      if (isOwnUrl(fb)) return sendJson(res, 400, { error: 'The fallback upstream cannot be HarFiddle itself; requests would loop forever' });
+    }
+    Object.assign(settings, patch);
     seq.clear();
     saveState();
     broadcast('settings', settings);
@@ -1256,22 +1503,23 @@ async function api(req, res, u) {
   // sessions
   if (p === '/api/sessions' && m === 'GET') return sendJson(res, 200, [...sessions.values()].map(summary));
   if (p === '/api/sessions' && m === 'DELETE') {
-    const b = await jsonBody(req).catch(() => ({}));
+    const b = await jsonObject(req); // malformed JSON throws -> 400, instead of clearing everything
     if (Array.isArray(b.ids)) {
-      b.ids.forEach((id) => sessions.delete(+id));
+      b.ids.forEach((id) => dropSession(+id));
       broadcast('removed', { ids: b.ids.map(Number) });
     } else {
       sessions.clear();
+      sessionBytes = 0;
       broadcast('cleared', {});
     }
     return sendJson(res, 200, { ok: true });
   }
   if (p === '/api/sessions/replay' && m === 'POST') {
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     const out = [];
     const wasCapturing = settings.capture;
     settings.capture = true;
-    for (const id of b.ids || []) {
+    for (const id of Array.isArray(b.ids) ? b.ids : []) {
       const old = sessions.get(+id);
       if (!old || old.method === 'CONNECT') continue;
       const reqPairs = old.reqHeaders.filter(([k]) => !k.startsWith(':'));
@@ -1284,9 +1532,9 @@ async function api(req, res, u) {
   }
   if (p === '/api/log' && m === 'GET') return sendJson(res, 200, logBuf);
   if (p === '/api/sessions/mark' && m === 'POST') {
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     const mark = MARKS.has(b.mark) ? b.mark : null;
-    for (const id of b.ids || []) {
+    for (const id of Array.isArray(b.ids) ? b.ids : []) {
       const s = sessions.get(+id);
       if (!s) continue;
       s.mark = mark;
@@ -1301,10 +1549,18 @@ async function api(req, res, u) {
   if (p === '/api/sessions/export.har' && m === 'GET') {
     const ids = u.searchParams.get('ids');
     const list = ids ? ids.split(',').map(Number).map((id) => sessions.get(id)).filter(Boolean) : [...sessions.values()];
-    const har = { log: { version: '1.2', creator: { name: 'HarFiddle', version: '1.0' }, pages: [], entries: list.filter((s) => s.method !== 'CONNECT').map(sessionToHarEntry) } };
-    const b = Buffer.from(JSON.stringify(har, null, 1));
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="harfiddle-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.har"`, 'Content-Length': b.length });
-    return res.end(b);
+    // written entry by entry: one big JSON.stringify fails past ~512 MB (captures can hold far more)
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="harfiddle-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.har"` });
+    res.write(`{"log":{"version":"1.2","creator":{"name":"HarFiddle","version":${JSON.stringify(require('./package.json').version)}},"pages":[],"entries":[\n`);
+    let first = true;
+    for (const s of list) {
+      if (s.method === 'CONNECT') continue;
+      if (res.destroyed) return;
+      const ok = res.write((first ? '' : ',\n') + JSON.stringify(sessionToHarEntry(s)));
+      first = false;
+      if (!ok) await new Promise((r) => { res.once('drain', r); res.once('close', r); });
+    }
+    return res.end('\n]}}\n');
   }
   if ((mm = p.match(/^\/api\/sessions\/(\d+)$/)) && m === 'GET') {
     const s = sessions.get(+mm[1]);
@@ -1330,9 +1586,10 @@ async function api(req, res, u) {
     return sendJson(res, 200, importHar(name, text));
   }
   if (p === '/api/rules' && m === 'POST') {
-    const b = await jsonBody(req);
-    const r = newRule({
-      source: 'custom', method: (b.method || '*').toUpperCase(), match: b.match || '', status: +b.status || 200, action: String(b.action || '').trim(),
+    const b = await jsonObject(req);
+    if (b.status != null && !validStatus(b.status)) return sendJson(res, 400, { error: 'Status must be between 200 and 599' });
+    const r = normalizeRule({
+      source: 'custom', method: String(b.method || '*').toUpperCase(), match: String(b.match || ''), status: validStatus(b.status) || 200, action: String(b.action || '').trim(),
       headers: parseHeaderText(b.headersText || 'Content-Type: application/json'),
       body: Buffer.from(b.bodyText || '', 'utf8').toString('base64'),
     });
@@ -1343,7 +1600,7 @@ async function api(req, res, u) {
     return sendJson(res, 200, ruleDetail(r));
   }
   if (p === '/api/rules/bulk' && m === 'POST') {
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     const ids = new Set(b.ids || []);
     const pick = (r) => (b.source ? r.source === b.source : ids.has(r.id));
     if (b.action === 'delete') {
@@ -1361,7 +1618,7 @@ async function api(req, res, u) {
   }
   if ((mm = p.match(/^\/api\/sources\/(.+)$/)) && m === 'PUT') {
     const name = decodeURIComponent(mm[1]);
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     sources[name] = { ...(sources[name] || {}), enabled: !!b.enabled };
     seq.clear();
     saveState();
@@ -1380,11 +1637,12 @@ async function api(req, res, u) {
       return sendJson(res, 200, { ok: true });
     }
     if (m === 'PUT') {
-      const b = await jsonBody(req);
+      const b = await jsonObject(req);
       if ('enabled' in b) r.enabled = !!b.enabled;
       if ('method' in b) r.method = String(b.method || '*').toUpperCase();
       if ('match' in b) r.match = String(b.match);
-      if ('status' in b) r.status = +b.status || 200;
+      if ('status' in b && !validStatus(b.status)) return sendJson(res, 400, { error: 'Status must be between 200 and 599' });
+      if ('status' in b) r.status = validStatus(b.status);
       if ('statusText' in b) r.statusText = String(b.statusText || '');
       if ('delay' in b) r.delay = b.delay === '' || b.delay == null ? null : +b.delay;
       if ('comment' in b) r.comment = String(b.comment || '');
@@ -1404,7 +1662,7 @@ async function api(req, res, u) {
     }
   }
   if (p === '/api/test-match' && m === 'POST') {
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     const method = String(b.method || 'GET').toUpperCase();
     const url = String(b.url || '');
     let single = null;
@@ -1416,7 +1674,7 @@ async function api(req, res, u) {
         single = (!settings.matchMethod || r.method === '*' || r.method === method) && ruleMatchesUrl(r, url, urlKey(url, o), o, sig);
       }
     }
-    const saved = new Map(seq);
+    const saved = new Map([...seq].map(([k, v]) => [k, new Set(v)])); // testing must not advance playback
     const r = findRule(method, url, Buffer.from(b.body || ''), !!b.direct);
     seq.clear();
     saved.forEach((v, k) => seq.set(k, v));
@@ -1425,14 +1683,18 @@ async function api(req, res, u) {
 
   // composer
   if (p === '/api/compose' && m === 'POST') {
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     let url = String(b.url || '').trim();
     if (!/^https?:\/\//i.test(url)) url = 'http://' + url;
     try { new URL(url); } catch { return sendJson(res, 400, { error: 'Invalid URL' }); }
-    const reqPairs = parseHeaderText(b.headersText);
+    const method = String(b.method || 'GET').toUpperCase();
+    if (!/^[A-Z][A-Z0-9_-]*$/.test(method)) return sendJson(res, 400, { error: `Invalid method "${method}"` });
+    if (method === 'CONNECT') return sendJson(res, 400, { error: 'CONNECT cannot be sent from the Composer' });
+    if (isOwnUrl(url)) return sendJson(res, 400, { error: "The Composer can't send requests to HarFiddle's own ports" });
+    const reqPairs = parseHeaderText(b.headersText).filter(([k, v]) => { try { http.validateHeaderName(k); http.validateHeaderValue(k, v); return true; } catch { return false; } });
     if (!hdr(reqPairs, 'host')) reqPairs.unshift(['Host', new URL(url).host]);
     const sink = collectSink();
-    const ctx = { method: String(b.method || 'GET').toUpperCase(), url, mode: 'composer', process: 'HarFiddle Composer', reqPairs, body: Buffer.from(b.bodyText || '', 'utf8'), useRules: b.useRules !== false, sink };
+    const ctx = { method, url, mode: 'composer', process: 'HarFiddle Composer', reqPairs, body: Buffer.from(b.bodyText || '', 'utf8'), useRules: b.useRules !== false, sink };
     const wasCapturing = settings.capture;
     settings.capture = true; // composer requests are always recorded
     const pending = handle(ctx);
@@ -1444,7 +1706,7 @@ async function api(req, res, u) {
 
   // environment
   if (p === '/api/proxy-port' && m === 'POST') {
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     try {
       await changeProxyPort(b.port);
       return sendJson(res, 200, await info());
@@ -1453,7 +1715,7 @@ async function api(req, res, u) {
     }
   }
   if (p === '/api/system-proxy' && m === 'POST') {
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     try {
       await setSystemProxy(!!b.on);
       return sendJson(res, 200, await info());
@@ -1462,7 +1724,7 @@ async function api(req, res, u) {
     }
   }
   if (p === '/api/launch-browser' && m === 'POST') {
-    const b = await jsonBody(req);
+    const b = await jsonObject(req);
     try {
       await launchBrowser(b.browser, b.url);
       log(`Launched ${b.browser === 'edge' ? 'Microsoft Edge' : 'Google Chrome'} with proxy 127.0.0.1:${proxyPort}`);
@@ -1488,11 +1750,11 @@ async function api(req, res, u) {
 }
 
 async function onUiRequest(req, res) {
-  const u = new URL(req.url, 'http://ui');
   // Only answer to our own origin (blocks DNS-rebinding / drive-by requests from other sites).
   const hostOk = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(req.headers.host || '');
   if (!hostOk) { res.writeHead(403); return res.end('Forbidden'); }
   try {
+    const u = new URL(req.url.replace(/^\/+/, '/'), 'http://ui');
     if (u.pathname === '/api/events') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
       res.write('retry: 1000\n\n');
@@ -1522,6 +1784,7 @@ async function onUiRequest(req, res) {
 fs.mkdirSync(DATA_DIR, { recursive: true });
 restoreSystemProxySync(); // in case a previous run crashed with the system proxy on
 loadState();
+startupWarnings.forEach((w) => log(w)); // in the Log before the UI can connect
 proxyPort = +(PORT_ARG || settings.proxyPort || 8888);
 const ca = new CertAuthority(DATA_DIR);
 
@@ -1626,6 +1889,13 @@ function shutdown() {
   exiting = true;
   saveNow();
   restoreSystemProxySync();
+  // still pointed at us without a backup to restore from (e.g. it was left over from a crash): switch it off
+  if (systemProxyOn && !readBackup() && process.platform === 'darwin') {
+    try {
+      const services = execFileSync('networksetup', ['-listallnetworkservices'], { timeout: 5000 }).toString().split('\n').slice(1).map((l) => l.trim()).filter((l) => l && !l.startsWith('*'));
+      for (const svc of services) for (const [, , state] of PROXY_KINDS) { try { execFileSync('networksetup', [state, svc, 'off'], { timeout: 5000 }); } catch {} }
+    } catch {}
+  }
   process.exit(0);
 }
 // when launched by the macOS app: quit (and restore the system proxy) if the app goes away

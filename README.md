@@ -194,6 +194,7 @@ cd harfiddle
 npm install
 
 npm start                        # run without building; the UI opens in your browser
+npm test                         # end-to-end tests (local test servers, no internet needed)
 npm run build:mac                # dist/HarFiddle.app + .dmg + .zip (universal)
 ARCH=arm64 npm run build:mac     # Apple Silicon only, about half the size
 ARCH=x86_64 npm run build:mac    # Intel only
@@ -263,6 +264,9 @@ itself are macOS only.
 ## Contributing
 
 Issues and pull requests are welcome. To work on the UI, edit `public/`, run `npm start` and reload the page.
+Run `npm test` before sending a change. It starts HarFiddle with a temporary data folder and local test
+servers and checks the proxy, HTTPS interception, AutoResponder, HAR import/export and the API. It never
+touches your system proxy or keychain.
 
 ## License
 

@@ -1,10 +1,11 @@
 {
   "name": "harfiddle",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build:mac": "bash scripts/build-mac.sh"
+    "build:mac": "bash scripts/build-mac.sh",
+    "test": "node test/e2e.js"
   },
   "license": "MIT",
   "description": "HTTP/HTTPS debugging proxy for macOS. Capture and inspect traffic, view HAR files, and replay HAR files as a mock server with an AutoResponder.",

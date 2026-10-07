@@ -7,6 +7,7 @@ const store = {
   set(k, v) { try { localStorage.setItem('hf-' + k, JSON.stringify(v)); } catch {} },
 };
 const MAX_ROWS = 5000;
+const IS_MAC = /Mac/.test(navigator.platform || navigator.userAgent);
 
 const state = {
   sessions: new Map(), // id -> summary
@@ -29,6 +30,8 @@ const state = {
   reqView: store.get('reqView', 'Headers'),
   resView: store.get('resView', 'TextView'),
   tab: store.get('tab', 'inspector'),
+  keepFloor: 0, // highest session id dropped by Keep
+  atBottom: null,
 };
 
 // ------------------------------------------------------------ api & status
@@ -84,9 +87,9 @@ const COLS = [
 const fmtDur = (ms) => (ms == null ? '' : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`);
 const CELL = {
   id: (s) => `<td class="c-id"><svg><use href="#${iconFor(s)}"/></svg>${s.id}</td>`,
-  result: (s) => `<td>${s.source === 'pending' || s.source === 'aborted' ? '-' : s.status || (s.source === 'error' ? '502' : '-')}</td>`,
+  result: (s) => `<td>${s.source === 'pending' || s.source === 'aborted' ? '-' : esc(s.status || (s.source === 'error' ? '502' : '-'))}</td>`,
   method: (s) => `<td>${esc(s.method)}</td>`,
-  protocol: (s) => `<td>${s.protocol}</td>`,
+  protocol: (s) => `<td>${esc(s.protocol)}</td>`,
   host: (s) => `<td title="${esc(s.host)}">${isConnect(s) ? 'Tunnel to' : esc(s.host)}</td>`,
   url: (s) => `<td title="${esc(s.url)}">${esc(isConnect(s) ? s.host : s.path)}</td>`,
   ctype: (s) => `<td title="${esc(s.contentType)}">${esc(ctOf(s))}</td>`,
@@ -228,10 +231,15 @@ function paintRow(tr, s) {
   tr.hidden = !rowMatches(s);
 }
 function upsertSession(s) {
-  state.sessions.set(s.id, s);
   let tr = state.rows.get(s.id);
+  if (!tr && s.id <= state.keepFloor) return; // a late update for a session the Keep limit already dropped
+  state.sessions.set(s.id, s);
   const wrap = $('#sessWrap');
-  const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 24;
+  // reading the scroll position forces a layout, so do it once per frame of updates, not per row
+  if (state.atBottom == null) {
+    state.atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 24;
+    setTimeout(() => { if (state.atBottom) wrap.scrollTop = wrap.scrollHeight; state.atBottom = null; }, 0);
+  }
   if (!tr) {
     tr = document.createElement('tr');
     tr.dataset.id = s.id;
@@ -240,38 +248,69 @@ function upsertSession(s) {
     enforceKeep();
   }
   paintRow(tr, s);
-  if (atBottom && !tr.hidden) wrap.scrollTop = wrap.scrollHeight;
   if (s.id === state.focus && s.source !== 'pending' && state.detail && state.detail.source === 'pending') loadDetail(s.id);
   if (composerWaiting === s.id && s.source !== 'pending') composerDone(s.id);
   scheduleChrome();
 }
 function dropRows(ids) {
+  let selectionTouched = false;
   for (const id of ids) {
-    state.rows.get(id)?.remove();
+    if (!state.rows.has(id)) continue;
+    state.rows.get(id).remove();
     state.rows.delete(id);
     state.sessions.delete(id);
-    state.sel.delete(id);
-    if (state.focus === id) { state.focus = null; state.detail = null; }
+    if (state.sel.delete(id)) selectionTouched = true;
+    if (state.anchor === id) state.anchor = null;
+    if (state.focus === id) {
+      selectionTouched = true;
+      state.focus = [...state.sel].pop() ?? null; // keep inspecting another selected session if there is one
+      state.detail = null;
+    }
   }
-  onSelectionChanged();
+  if (selectionTouched) onSelectionChanged();
+  else scheduleChrome();
 }
+// Keep: N drops the oldest sessions, here and in the engine (so Save and reloads agree with the list)
 function enforceKeep() {
   const limit = state.keep || MAX_ROWS;
   if (state.rows.size <= limit) return;
   const extra = [...state.rows.keys()].slice(0, state.rows.size - limit);
+  state.keepFloor = Math.max(state.keepFloor, ...extra);
   dropRows(extra);
+  if (state.keep) api('/api/sessions', { method: 'DELETE', json: { ids: extra } }).catch(() => {});
 }
 function applyFilter() {
   for (const [id, tr] of state.rows) tr.hidden = !rowMatches(state.sessions.get(id));
+  const hidden = [...state.sel].filter((id) => state.rows.get(id)?.hidden);
+  if (hidden.length) { // never act on sessions the user can't see
+    hidden.forEach((id) => { state.sel.delete(id); state.rows.get(id).classList.remove('sel'); });
+    if (!state.sel.has(state.focus)) state.focus = [...state.sel].pop() ?? null;
+    onSelectionChanged();
+  }
   scheduleChrome();
 }
 async function loadSessions() {
   const list = await api('/api/sessions');
-  $('#sessBody').innerHTML = '';
+  const body = $('#sessBody');
+  body.innerHTML = '';
   state.rows.clear();
   state.sessions.clear();
-  list.forEach(upsertSession);
+  state.keepFloor = 0;
+  const frag = document.createDocumentFragment();
+  for (const s of list) {
+    state.sessions.set(s.id, s);
+    const tr = document.createElement('tr');
+    tr.dataset.id = s.id;
+    state.rows.set(s.id, tr);
+    paintRow(tr, s);
+    frag.appendChild(tr);
+  }
+  body.appendChild(frag);
+  enforceKeep();
+  $('#sessWrap').scrollTop = $('#sessWrap').scrollHeight;
   for (const id of [...state.sel]) if (!state.sessions.has(id)) state.sel.delete(id);
+  if (state.focus != null && !state.sessions.has(state.focus)) state.focus = [...state.sel].pop() ?? null;
+  if (state.anchor != null && !state.sessions.has(state.anchor)) state.anchor = null;
   onSelectionChanged();
 }
 const visibleIds = () => [...state.rows].filter(([, tr]) => !tr.hidden).map(([id]) => id);
@@ -299,8 +338,10 @@ $('#sessBody').addEventListener('mousedown', (e) => {
   const tr = e.target.closest('tr');
   if (!tr) return;
   const id = +tr.dataset.id;
-  if (e.button === 2 && state.sel.has(id)) return;
-  if (e.metaKey || e.ctrlKey) {
+  const contextClick = e.button === 2 || (IS_MAC && e.ctrlKey);
+  if (contextClick && state.sel.has(id)) return;
+  if (contextClick) { state.anchor = id; return select([id], id); }
+  if (IS_MAC ? e.metaKey : e.metaKey || e.ctrlKey) {
     const next = new Set(state.sel);
     next.has(id) ? next.delete(id) : next.add(id);
     state.anchor = id;
@@ -322,7 +363,7 @@ $('#sessWrap').addEventListener('keydown', (e) => {
     if (!vis.length) return;
     let i = vis.indexOf(state.focus);
     i = e.key === 'ArrowDown' ? Math.min(vis.length - 1, i + 1) : Math.max(0, i === -1 ? 0 : i - 1);
-    if (e.shiftKey && state.anchor != null) {
+    if (e.shiftKey && state.anchor != null && vis.includes(state.anchor)) {
       const a = vis.indexOf(state.anchor);
       select(vis.slice(Math.min(a, i), Math.max(a, i) + 1), vis[i], { scroll: true });
     } else {
@@ -470,7 +511,7 @@ function cookiesView(d, which) {
   const rows = d.resHeaders.filter(([k]) => /^set-cookie$/i.test(k)).map(([, v]) => {
     const [nv, ...attrs] = String(v).split(/;\s*/);
     const i = nv.indexOf('=');
-    return [nv.slice(0, i), nv.slice(i + 1), attrs.join('; ')];
+    return i === -1 ? [nv, '', attrs.join('; ')] : [nv.slice(0, i), nv.slice(i + 1), attrs.join('; ')];
   });
   return `<div class="hdr-tree">${gridTable('Response sets cookies', rows, ['Name', 'Value', 'Attributes'])}</div>`;
 }
@@ -514,11 +555,11 @@ function jsonView(view) {
 }
 function imageView(d) {
   const v = d.resBody;
-  const ct = hdrVal(d.resHeaders, 'content-type').split(';')[0];
-  if (!/^image\//.test(ct) || !v || !v.size) return '<div class="empty-note">This response is not an image.</div>';
+  const ct = String(hdrVal(d.resHeaders, 'content-type')).split(';')[0].trim().toLowerCase();
+  if (!/^image\/[\w.+-]+$/.test(ct) || !v || !v.size) return '<div class="empty-note">This response is not an image.</div>';
   const src = v.base64 ? `data:${ct};base64,${v.base64}` : /svg/.test(ct) && v.text != null ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(v.text)}` : null;
   if (!src) return '<div class="empty-note">Image too large to preview.</div>';
-  return `<div class="view-wrap"><div class="imginfo" data-imginfo>${esc(ct)} · ${n0(v.size)} bytes</div><div class="scroll imgview"><img alt="" src="${src}" data-img></div></div>`;
+  return `<div class="view-wrap"><div class="imginfo" data-imginfo>${esc(ct)} · ${n0(v.size)} bytes</div><div class="scroll imgview"><img alt="" src="${esc(src)}" data-img></div></div>`;
 }
 function webView(d) {
   const ct = hdrVal(d.resHeaders, 'content-type');
@@ -793,9 +834,16 @@ async function removeIds(ids) {
   if (!ids.length) return;
   await api('/api/sessions', { method: 'DELETE', json: { ids } });
 }
+// Downloads through a hidden frame: if the server answers with an error page instead of a file, it lands
+// in the frame rather than replacing HarFiddle's own window.
+function download(url) {
+  let f = $('#dlFrame');
+  if (!f) { f = document.createElement('iframe'); f.id = 'dlFrame'; f.hidden = true; document.body.appendChild(f); }
+  f.src = url + (url.includes('?') ? '&' : '?') + '_=' + Date.now();
+}
 function exportHar(ids) {
   if (ids && !ids.length) return status('Nothing selected to save', true);
-  location.href = '/api/sessions/export.har' + (ids ? '?ids=' + ids.join(',') : '');
+  download('/api/sessions/export.har' + (ids ? '?ids=' + ids.join(',') : ''));
   status(`Saving ${ids ? ids.length : state.sessions.size} sessions as HAR…`);
 }
 async function replay(useRules) {
@@ -865,7 +913,7 @@ const COMMANDS = {
   chrome: () => launch('chrome'),
   edge: () => launch('edge'),
   trust: trustCa,
-  downloadCert: () => (location.href = '/harfiddle-ca.pem'),
+  downloadCert: () => download('/harfiddle-ca.pem'),
 };
 // Fiddler's marking shortcuts: Ctrl+1…6 colors, Ctrl+0 unmark
 const MARK_KEYS = { 1: 'red', 2: 'blue', 3: 'gold', 4: 'green', 5: 'orange', 6: 'purple', 0: null };
@@ -897,8 +945,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'F12') { e.preventDefault(); toggleSystemCapture(); }
   else if (e.key === 'F7') { e.preventDefault(); showTab('stats'); }
   else if (e.key === 'F8') { e.preventDefault(); showTab('inspector'); }
-  else if (e.altKey && (e.key === 'q' || e.code === 'KeyQ')) { e.preventDefault(); $('#qx').focus(); }
-  else if (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'f') { e.preventDefault(); run('find'); }
+  else if (!typing && e.altKey && e.code === 'KeyQ') { e.preventDefault(); $('#qx').focus(); }
+  else if (!typing && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'f') { e.preventDefault(); run('find'); }
   else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); run('saveAll'); }
   else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'u') { e.preventDefault(); if (state.sel.size) run('copyUrl'); }
   else if (!typing && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'x') { e.preventDefault(); run('removeAll'); }
@@ -1032,7 +1080,18 @@ async function loadRules() {
   const r = await api('/api/rules');
   state.rules = r.rules;
   state.sources = r.sources;
+  if (state.selRule && !state.rules.some((x) => x.id === state.selRule)) clearRuleEditor();
   renderRules();
+}
+function clearRuleEditor() {
+  state.selRule = null;
+  state.ruleDetail = null;
+  $('#ruleEditor').disabled = true;
+  ['#reMatch', '#reAction', '#reMethod', '#reStatus', '#reDelay', '#reHeaders', '#reBody'].forEach((sel) => ($(sel).value = ''));
+  $('#reOnce').checked = false;
+  $('#reBinary').hidden = true;
+  $('#reBody').hidden = false;
+  $('#reInfo').textContent = '';
 }
 function matchText(m) {
   if (!m || m === '*') return '*';
@@ -1101,6 +1160,7 @@ async function selectRule(id, scroll) {
   }
   try {
     const r = await api('/api/rules/' + id);
+    if (state.selRule !== id) return; // the user already moved to another rule
     state.ruleDetail = r;
     $('#ruleEditor').disabled = false;
     $('#reMatch').value = r.match;
@@ -1143,24 +1203,26 @@ $('#reSave').addEventListener('click', async () => {
 $('#reDelete').addEventListener('click', async () => {
   const id = state.selRule;
   if (!id) return;
-  await api('/api/rules/' + id, { method: 'DELETE' });
-  state.selRule = null;
-  $('#ruleEditor').disabled = true;
-  ['#reMatch', '#reAction', '#reMethod', '#reStatus', '#reDelay', '#reHeaders', '#reBody'].forEach((s) => ($(s).value = ''));
-  status('Rule removed');
+  try { await api('/api/rules/' + id, { method: 'DELETE' }); status('Rule removed'); }
+  catch (e) { status(e.message, true); }
+  clearRuleEditor();
 });
 $('#reTop').addEventListener('click', async () => {
   if (!state.selRule) return;
-  await api('/api/rules/' + state.selRule, { method: 'PUT', json: { move: 'top' } });
-  status('Rule moved to the top; it now wins over other matching rules');
+  try {
+    await api('/api/rules/' + state.selRule, { method: 'PUT', json: { move: 'top' } });
+    status('Rule moved to the top; it now wins over other matching rules');
+  } catch (e) { status(e.message, true); }
 });
 $('#addRule').addEventListener('click', async () => {
   const s = state.focus != null && state.sessions.get(state.focus);
-  const r = await api('/api/rules', { method: 'POST', json: { method: '*', match: s ? 'EXACT:' + s.url : 'EXACT:https://example.com/path', status: 200, headersText: 'Content-Type: application/json', bodyText: '{}' } });
-  await loadRules();
-  await selectRule(r.id, true);
-  $('#reMatch').focus();
-  $('#reMatch').select();
+  try {
+    const r = await api('/api/rules', { method: 'POST', json: { method: '*', match: s ? 'EXACT:' + s.url : 'EXACT:https://example.com/path', status: 200, headersText: 'Content-Type: application/json', bodyText: '{}' } });
+    await loadRules();
+    await selectRule(r.id, true);
+    $('#reMatch').focus();
+    $('#reMatch').select();
+  } catch (e) { status(e.message, true); }
 });
 async function addSessionsToAutoResponder() {
   const ids = selectedIds().filter((id) => { const s = state.sessions.get(id); return s.status && !isConnect(s); });
@@ -1177,7 +1239,7 @@ async function addSessionsToAutoResponder() {
 $('#reTest').addEventListener('click', () => {
   const m = $('#reMatch').value.trim();
   $('#testRuleText').textContent = m || '*';
-  $('#testMethod').value = /^[A-Z]+$/.test($('#reMethod').value) ? $('#reMethod').value : 'GET';
+  setSelect($('#testMethod'), /^[A-Z]+$/.test($('#reMethod').value) ? $('#reMethod').value : 'GET');
   if (!$('#testUrl').value) $('#testUrl').value = /^exact:/i.test(m) ? m.slice(6) : '';
   $('#testResult').innerHTML = '';
   openDialog('testDlg');
@@ -1189,7 +1251,9 @@ $('#testRun').addEventListener('click', async () => {
   const direct = !/^https?:\/\//i.test(url);
   const full = direct ? `http://localhost:${state.info.proxyPort}${url.startsWith('/') ? '' : '/'}${url}` : url;
   const unsaved = $('#reMatch').value.trim() !== (state.ruleDetail?.match || '');
-  const r = await api('/api/test-match', { method: 'POST', json: { method: $('#testMethod').value, url: full, direct, ruleId: state.selRule } });
+  let r;
+  try { r = await api('/api/test-match', { method: 'POST', json: { method: $('#testMethod').value, url: full, direct, ruleId: state.selRule } }); }
+  catch (e) { $('#testResult').textContent = e.message; return; }
   const first = r.rule ? `First matching rule overall: <span class="mono">${esc(r.rule.match)}</span> (${esc(r.rule.source)}).` : `No enabled rule matches; the request would ${state.settings.passthrough ? 'go to the server' : 'get a 404'}.`;
   $('#testResult').innerHTML = (r.ruleMatches ? '<div class="ok">✓ This rule matches.</div>' : '<div class="no">✗ This rule does not match.</div>') + `<div>${first}</div>` + (unsaved ? '<div class="muted">The match text has unsaved changes; save the rule to test them.</div>' : '');
 });
@@ -1228,11 +1292,13 @@ window.addEventListener('dragenter', (e) => {
 });
 window.addEventListener('dragleave', () => { if (--dragDepth <= 0) hideDrop(); });
 window.addEventListener('dragover', (e) => {
+  if (!hasFiles(e)) return;
   e.preventDefault();
   const z = e.target.closest?.('.zone');
   if (z) $$('#drop .zone').forEach((x) => x.classList.toggle('hot', x === z));
 });
 window.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return;
   e.preventDefault();
   const zone = $('#drop .zone.hot')?.dataset.zone || 'inspect';
   hideDrop();
@@ -1259,9 +1325,7 @@ function rawToParsed() {
   const lines = head.split('\n');
   const m = (lines.shift() || '').match(/^(\S+)\s+(\S+)/);
   if (m) {
-    const method = m[1].toUpperCase();
-    if (![...$('#cMethod').options].some((o) => o.value === method)) $('#cMethod').add(new Option(method));
-    $('#cMethod').value = method;
+    setSelect($('#cMethod'), m[1].toUpperCase());
     $('#cUrl').value = m[2];
   }
   $('#cHeaders').value = lines.filter((l) => !/^host:/i.test(l) || !/^https?:/i.test($('#cUrl').value)).join('\n');
@@ -1277,8 +1341,13 @@ $('#cmpTabs').addEventListener('click', (e) => {
   $('#cRaw').hidden = cmpMode !== 'raw';
   $('.cmp-top').hidden = cmpMode === 'raw';
 });
+// sets a <select>, adding the option first if it's missing (PROPFIND, PURGE, …)
+function setSelect(sel, value) {
+  if (![...sel.options].some((o) => o.value === value)) sel.add(new Option(value));
+  sel.value = value;
+}
 function loadIntoComposer(d) {
-  $('#cMethod').value = d.method === 'CONNECT' ? 'GET' : d.method;
+  setSelect($('#cMethod'), d.method === 'CONNECT' ? 'GET' : d.method);
   $('#cUrl').value = d.url;
   $('#cHeaders').value = d.reqHeaders.filter(([k]) => !/^(host|content-length|connection|proxy-connection)$/i.test(k) && !k.startsWith(':')).map(([k, v]) => `${k}: ${v}`).join('\n');
   $('#cBody').value = d.reqBody.text || '';
@@ -1320,7 +1389,7 @@ function connect() {
       const [, , log] = await Promise.all([loadSessions(), loadRules(), api('/api/log')]);
       $('#logView').innerHTML = '';
       log.forEach(appendLog);
-      applyHash();
+      if (!state.hashApplied) { state.hashApplied = true; applyHash(); }
     } catch (e) { status(e.message, true); }
   };
   es.onerror = () => {

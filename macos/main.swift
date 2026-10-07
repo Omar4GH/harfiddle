@@ -76,6 +76,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func spawnEngine() {
+        // never start a second engine while ours is still starting up (Retry, failed page loads)
+        if let p = server, p.isRunning { waitForEngine(attempt: 0); return }
         guard let resources = Bundle.main.resourceURL else { return }
         let appDir = resources.appendingPathComponent("app")
         guard let node = findNode() else {
@@ -97,7 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         p.standardError = pipe
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let s = String(data: data, encoding: .utf8) else { return }
+            if data.isEmpty { handle.readabilityHandler = nil; return } // end of output: stop polling
+            let s = String(decoding: data, as: UTF8.self) // lossy: a character split across reads isn't dropped
             DispatchQueue.main.async {
                 self.serverLog += s
                 if self.serverLog.count > 20_000 { self.serverLog = String(self.serverLog.suffix(10_000)) }
@@ -128,9 +131,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         server = nil
         if quitting { return }
         let log = serverLog.trimmingCharacters(in: .whitespacesAndNewlines)
+        var hint = ""
+        if log.contains("UI port") {
+            hint = "Another program is using the UI port \(uiPort). Quit it, or pick another port:\ndefaults write io.github.harfiddle UIPort 9001"
+        } else if log.contains("Proxy port") {
+            hint = "Another program (or another HarFiddle) is using the proxy port shown above. Quit it, or start on another port:\ndefaults write io.github.harfiddle ProxyPort 9000\n(then pick a permanent port in Tools › Options › Connections and run: defaults delete io.github.harfiddle ProxyPort)"
+        }
         fail("The HarFiddle engine stopped (exit code \(status)).",
-             (log.isEmpty ? "" : String(log.suffix(1500)) + "\n\n") +
-             "If a port is busy, change it with:\ndefaults write io.github.harfiddle ProxyPort 9000")
+             (log.isEmpty ? "" : String(log.suffix(1500)) + "\n\n") + hint)
     }
 
     func ping(_ done: @escaping (Bool) -> Void) {
@@ -206,12 +214,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // MARK: WKNavigationDelegate
 
+    /// Only web and mail links are ever handed to other apps. A captured or imported page shown in WebView must
+    /// not be able to launch apps or custom URL schemes (file:, x-app:, …).
+    func openExternally(_ url: URL) {
+        guard let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { return decisionHandler(.allow) }
         let local = ["127.0.0.1", "localhost"].contains(url.host ?? "") && url.port == uiPort
         if local || url.scheme == "about" || url.scheme == "data" { return decisionHandler(.allow) }
-        NSWorkspace.shared.open(url) // external links open in the default browser
+        // links in HarFiddle's own page open in the default browser; anything a sub-frame (a previewed
+        // response) tries to load or navigate to is simply blocked
+        if action.targetFrame?.isMainFrame ?? true, action.navigationType == .linkActivated || action.targetFrame == nil {
+            openExternally(url)
+        }
         decisionHandler(.cancel)
     }
 
@@ -234,6 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         if (error as NSError).code == NSURLErrorCancelled || (error as NSError).code == 102 { return } // 102: turned into a download
+        // the page failed to load (engine restarting?): retry the load; spawnEngine won't duplicate a running engine
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.startEngine() }
     }
 
@@ -265,7 +285,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = action.request.url { NSWorkspace.shared.open(url) }
+        // window.open() from HarFiddle's page (e.g. Header Definitions); previews can't run scripts
+        if let url = action.request.url, action.sourceFrame.isMainFrame { openExternally(url) }
         return nil
     }
 
