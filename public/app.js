@@ -30,6 +30,7 @@ const state = {
   reqView: store.get('reqView', 'Headers'),
   resView: store.get('resView', 'TextView'),
   tab: store.get('tab', 'inspector'),
+  filterTerms: [],
   keepFloor: 0, // highest session id dropped by Keep
   atBottom: null,
 };
@@ -221,10 +222,63 @@ function rowMatches(s) {
   if (state.show === 'har' && s.source !== 'har') return false;
   if (state.show === 'marked' && !s.mark) return false;
   if (state.show === 'error' && !(s.source === 'error' || s.source === 'blocked' || s.status >= 400)) return false;
-  if (!state.filter) return true;
-  const hay = `${s.method} ${s.url} ${s.status} ${s.source} ${s.contentType} ${s.process} ${commentFor(s)}`.toLowerCase();
-  return state.filter.split(/\s+/).every((t) => hay.includes(t));
+  if (!state.filterTerms.length) return true;
+  return state.filterTerms.every((t) => matchTerm(s, t) !== t.neg);
 }
+
+// ------------------------------------------------------------ search / filter
+// "host:api status:4xx -process:chrome login" → every term must match (a leading - excludes).
+const FILTER_FIELDS = { host: 'host', domain: 'host', path: 'url', url: 'url', process: 'process', proc: 'process', app: 'process', method: 'method', status: 'status', code: 'status', type: 'type', ct: 'type', source: 'source', mark: 'mark' };
+function parseFilter(text) {
+  const terms = [];
+  for (const m of String(text || '').matchAll(/(-?)(?:(\w+):)?(?:"([^"]*)"|(\S+))/g)) {
+    let [, neg, field, quoted, word] = m;
+    let value = (quoted ?? word ?? '').toLowerCase();
+    if (field && !FILTER_FIELDS[field.toLowerCase()]) { value = `${field}:${value}`.toLowerCase(); field = null; } // e.g. "https:" in a pasted URL
+    if (!value) continue;
+    const t = { neg: !!neg, field: field ? FILTER_FIELDS[field.toLowerCase()] : null, value };
+    if (t.field === 'status') t.re = new RegExp('^' + value.replace(/[^\dx]/g, '').replace(/x/g, '\\d') + (value.length < 3 && !/x/.test(value) ? '' : '$'));
+    terms.push(t);
+  }
+  return terms;
+}
+function matchTerm(s, t) {
+  const has = (v) => String(v ?? '').toLowerCase().includes(t.value);
+  switch (t.field) {
+    case 'host': return has(s.host);
+    case 'url': return has(s.url);
+    case 'process': return has(s.process);
+    case 'method': return String(s.method).toLowerCase() === t.value || has(s.method) && t.value.length > 2;
+    case 'status': return t.re.test(String(s.status || ''));
+    case 'type': return has(s.contentType);
+    case 'source': return has(s.source);
+    case 'mark': return has(s.mark);
+    default: return `${s.id} ${s.method} ${s.url} ${s.status} ${s.source} ${s.contentType} ${s.process} ${s.mark || ''} ${commentFor(s)}`.toLowerCase().includes(t.value);
+  }
+}
+function setFilter(text) {
+  state.filter = String(text || '').trim();
+  state.filterTerms = parseFilter(state.filter);
+  const box = $('#search');
+  if (box.value.trim() !== state.filter) box.value = state.filter;
+  box.parentElement.classList.toggle('active', !!state.filter);
+  applyFilter();
+  renderSearchCount();
+}
+function renderSearchCount() {
+  const el = $('#searchCount');
+  el.textContent = state.filter ? `${n0(visibleIds().length)} of ${n0(state.sessions.size)}` : '';
+}
+$('#search').addEventListener('input', (e) => setFilter(e.target.value));
+$('#search').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { e.stopPropagation(); setFilter(''); $('#sessWrap').focus(); }
+  else if (e.key === 'Enter' || e.key === 'ArrowDown') { // jump into the results
+    e.preventDefault();
+    const first = visibleIds()[0];
+    if (first != null) { state.anchor = first; select([first], first, { scroll: true }); $('#sessWrap').focus(); }
+  }
+});
+function focusSearch() { const box = $('#search'); box.focus(); box.select(); }
 function paintRow(tr, s) {
   tr.innerHTML = rowHtml(s);
   tr.className = [colorClass(s), s.source === 'auto' ? 'r-auto' : '', s.mark ? 'mk mk-' + s.mark : '', state.sel.has(s.id) ? 'sel' : ''].filter(Boolean).join(' ');
@@ -356,6 +410,12 @@ $('#sessBody').addEventListener('mousedown', (e) => {
   }
 });
 $('#sessBody').addEventListener('dblclick', () => showTab('inspector'));
+$('#sessWrap').addEventListener('mousedown', (e) => {
+  const wrap = e.currentTarget;
+  if (e.target.closest('tbody tr') || e.target.closest('thead')) return;
+  if (e.offsetX > wrap.clientWidth || e.offsetY > wrap.clientHeight) return; // a click on the scrollbars
+  if (e.button === 0 && state.sel.size) { state.anchor = null; select([], null); }
+});
 $('#sessWrap').addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
@@ -765,6 +825,7 @@ function paintChrome() {
     const active = state.rules.filter((r) => r.enabled && state.sources[r.source]?.enabled !== false).length;
     $('#sbRules').textContent = state.settings.rulesEnabled === false ? 'AutoResponder: off' : `AutoResponder: ${active} rule${active === 1 ? '' : 's'}${state.settings.passthrough === false ? ' (unmatched blocked)' : ''}`;
     $('#sessEmpty').hidden = total > 0;
+    renderSearchCount();
     $('#ruleCountText').textContent = state.rules.length ? `${n0(state.rules.length)} rules, ${n0(active)} active` : '';
   }
 }
@@ -895,7 +956,7 @@ const COMMANDS = {
   removeUnselected: () => removeIds([...state.sessions.keys()].filter((id) => !state.sel.has(id))),
   removeImported: () => removeIds([...state.sessions.values()].filter((s) => s.source === 'har').map((s) => s.id)),
   removeAll: () => api('/api/sessions', { method: 'DELETE' }),
-  find: () => { const q = $('#qx'); q.focus(); if (!q.value) { q.value = '?'; } q.setSelectionRange(q.value.length, q.value.length); },
+  find: focusSearch,
   replay: () => replay(true),
   replayLive: () => replay(false),
   compose: async () => { const id = state.focus ?? selectedIds()[0]; if (id != null) loadIntoComposer(await detailOf(id)); },
@@ -941,24 +1002,29 @@ $('#sbCapture').addEventListener('click', toggleSystemCapture);
 // global keys
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-  if (e.key === 'Escape') { closeMenus(); $$('.modal').forEach((m) => (m.hidden = true)); }
+  if (e.key === 'Escape') {
+    const open = $$('.menu.open').length || !$('#ctx').hidden || !$('#colmenu').hidden || $$('.modal').some((m) => !m.hidden);
+    closeMenus();
+    $$('.modal').forEach((m) => (m.hidden = true));
+    if (!open && !typing && state.sel.size) { state.anchor = null; select([], null); } // Esc deselects
+  }
   if (e.key === 'F12') { e.preventDefault(); toggleSystemCapture(); }
   else if (e.key === 'F7') { e.preventDefault(); showTab('stats'); }
   else if (e.key === 'F8') { e.preventDefault(); showTab('inspector'); }
   else if (!typing && e.altKey && e.code === 'KeyQ') { e.preventDefault(); $('#qx').focus(); }
-  else if (!typing && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'f') { e.preventDefault(); run('find'); }
+  else if ((e.metaKey || (!typing && e.ctrlKey)) && !e.altKey && e.key.toLowerCase() === 'f') { e.preventDefault(); focusSearch(); }
   else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); run('saveAll'); }
   else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'u') { e.preventDefault(); if (state.sel.size) run('copyUrl'); }
   else if (!typing && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'x') { e.preventDefault(); run('removeAll'); }
   else if (!typing && e.ctrlKey && !e.metaKey && /^Digit[0-6]$/.test(e.code)) { e.preventDefault(); markSelected(MARK_KEYS[e.code.slice(5)]); }
-  else if (!typing && e.key === '/') { e.preventDefault(); $('#qx').focus(); }
+  else if (!typing && e.key === '/') { e.preventDefault(); focusSearch(); }
   else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && state.tab === 'composer') { e.preventDefault(); $('#cSend').click(); }
 });
 
 // ------------------------------------------------------------ QuickExec
 const QX_HELP = `QuickExec commands
-  ?text          show only sessions whose URL, method, status or type contains text (Esc clears)
-  text           same as ?text
+  text           filter sessions (same as the search box: host: path: process: method: status: type: source:)
+  ?text          same as text
   cls / clear    remove all sessions
   start / stop   turn the system proxy on or off
   pause / resume pause or resume recording sessions
@@ -969,30 +1035,30 @@ const QX_HELP = `QuickExec commands
 const qx = $('#qx');
 qx.addEventListener('input', () => {
   const v = qx.value.trim();
-  if (v.startsWith('?')) { state.filter = v.slice(1).toLowerCase().trim(); applyFilter(); }
+  if (v.startsWith('?')) setFilter(v.slice(1));
 });
 qx.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { qx.value = ''; state.filter = ''; applyFilter(); $('#sessWrap').focus(); return; }
+  if (e.key === 'Escape') { qx.value = ''; setFilter(''); $('#sessWrap').focus(); return; }
   if (e.key !== 'Enter') return;
   const v = qx.value.trim();
   const [cmd, ...rest] = v.split(/\s+/);
   const arg = rest.join(' ');
   const done = (msg) => { if (msg) status(msg); qx.value = ''; };
   switch ((cmd || '').toLowerCase()) {
-    case '': state.filter = ''; applyFilter(); return;
+    case '': setFilter(''); return;
     case 'help': run('qxhelp'); return done();
     case 'cls': case 'clear': run('removeAll'); return done('Removed all sessions');
     case 'start': if (!state.info.systemProxy) toggleSystemCapture(); return done();
     case 'stop': if (state.info.systemProxy) toggleSystemCapture(); return done();
     case 'pause': saveSetting('capture', false); return done('Session list paused');
     case 'resume': saveSetting('capture', true); return done('Session list resumed');
-    case 'select': state.filter = arg.toLowerCase(); applyFilter(); return done(`Showing sessions matching "${arg}"`);
+    case 'select': setFilter('type:' + arg); return done(`Showing sessions whose content type contains "${arg}"`);
     case 'show': setShow(['auto', 'live', 'har', 'error', 'marked'].includes(arg) ? arg : 'all'); return done();
     case 'rules': saveSetting('rulesEnabled', arg !== 'off'); return done(`AutoResponder ${arg === 'off' ? 'disabled' : 'enabled'}`);
     default:
-      state.filter = (v.startsWith('?') ? v.slice(1) : v).toLowerCase().trim();
-      applyFilter();
-      status(`Filter: ${state.filter} — ${visibleIds().length} sessions match (Esc in QuickExec clears)`);
+      setFilter(v.startsWith('?') ? v.slice(1) : v);
+      qx.value = '';
+      status(`Filter: ${state.filter} (${visibleIds().length} sessions match; Esc in the search box clears it)`);
   }
 });
 

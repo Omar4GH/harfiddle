@@ -1,6 +1,6 @@
 {
   "name": "harfiddle",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -8,7 +8,7 @@
     "test": "node test/e2e.js"
   },
   "license": "MIT",
-  "description": "HTTP/HTTPS debugging proxy for macOS. Capture and inspect traffic, view HAR files, and replay HAR files as a mock server with an AutoResponder.",
+  "description": "A modern Fiddler Classic alternative for macOS: a Fiddler clone for Mac to capture and inspect HTTP/HTTPS traffic, view HAR files, and replay them with an AutoResponder.",
   "dependencies": {
     "node-forge": "^1.4.0"
   },
@@ -24,6 +24,8 @@
     "fiddler",
     "fiddler-alternative",
     "fiddler-mac",
+    "fiddler-clone",
+    "fiddler-classic",
     "http-proxy",
     "https-proxy",
     "debugging-proxy",

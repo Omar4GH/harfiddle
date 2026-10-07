@@ -160,6 +160,11 @@
       <option value="all">All sessions</option><option value="auto">AutoResponded</option><option value="live">Live traffic</option><option value="har">Imported</option><option value="error">Errors</option><option value="marked">Marked</option>
     </select>
   </label>
+  <label class="tb-search" title="Filter sessions. Plain words match anywhere; or use host: path: process: method: status: type: source: (e.g. host:api status:4xx -process:chrome). Esc clears.">
+    <svg><use href="#i-find"/></svg>
+    <input id="search" type="search" placeholder="Filter: host, path, process…  (⌘F)" spellcheck="false" autocomplete="off">
+    <span class="tb-count" id="searchCount"></span>
+  </label>
   <span class="tb-sep"></span>
   <button class="tb" data-cmd="find" title="Find sessions (Ctrl+F)"><svg><use href="#i-find"/></svg>Find</button>
   <button class="tb" data-cmd="saveAll" title="Save sessions as a .har file"><svg><use href="#i-save"/></svg>Save</button>

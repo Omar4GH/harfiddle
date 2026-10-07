@@ -325,3 +325,12 @@ pre.stats { margin: 0; padding: 6px 8px; font: 12px/1.45 var(--mono); flex: 1; o
 .dropdown .markrow button.sw-none:hover:not(:disabled) { background: #fff; }
 .dropdown .markrow button:disabled { opacity: .4; }
 .tb.busy { background: var(--hover); border-color: var(--hover-line); color: #555; cursor: progress; }
+
+/* toolbar search */
+.tb-search { display: inline-flex; align-items: center; gap: 4px; margin: 0 4px; padding: 0 4px; height: 22px; background: #fff; border: 1px solid #7a7a7a; min-width: 230px; flex: 0 1 340px; }
+.tb-search:focus-within { border-color: var(--sel); }
+.tb-search svg { width: 14px; height: 14px; }
+.tb-search input { border: 0 !important; padding: 0; height: 20px; flex: 1; outline: none; background: transparent; min-width: 60px; }
+.tb-search input::-webkit-search-cancel-button { cursor: default; }
+.tb-search.active { background: var(--info); }
+.tb-count { color: var(--muted); white-space: nowrap; font-size: 11px; }

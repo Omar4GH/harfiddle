@@ -10,7 +10,7 @@
 import Cocoa
 import WebKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     var server: Process?
@@ -236,39 +236,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        if let http = response.response as? HTTPURLResponse,
-           let cd = http.value(forHTTPHeaderField: "Content-Disposition"), cd.lowercased().contains("attachment") {
-            return decisionHandler(.download)
+        let http = response.response as? HTTPURLResponse
+        let attachment = http?.value(forHTTPHeaderField: "Content-Disposition")?.lowercased().contains("attachment") ?? false
+        if attachment || !response.canShowMIMEType, let url = response.response.url {
+            // Files (Save HAR, Export Root Certificate) are saved by the app itself, not by WebKit's download
+            // machinery: WebKit aborts the whole app if a download's destination question goes unanswered.
+            decisionHandler(.cancel)
+            saveFile(from: url, suggestedName: response.response.suggestedFilename ?? url.lastPathComponent)
+            return
         }
-        decisionHandler(response.canShowMIMEType ? .allow : .download)
+        decisionHandler(.allow)
     }
 
-    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
-        download.delegate = self
-    }
-
-    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
-        download.delegate = self
+    /// Asks where to save, then fetches the file from the engine straight to that location.
+    func saveFile(from url: URL, suggestedName: String) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = suggestedName
+        panel.canCreateDirectories = true
+        let finish: (NSApplication.ModalResponse) -> Void = { result in
+            guard result == .OK, let dest = panel.url else { return }
+            URLSession.shared.downloadTask(with: url) { tmp, response, error in
+                // the temporary file is deleted when this handler returns, so move it here, not later
+                var failure: String?
+                if let error = error {
+                    failure = error.localizedDescription
+                } else if let status = (response as? HTTPURLResponse)?.statusCode, status != 200 {
+                    failure = "HarFiddle answered with HTTP \(status)."
+                } else if let tmp = tmp {
+                    do {
+                        try? FileManager.default.removeItem(at: dest)
+                        try FileManager.default.moveItem(at: tmp, to: dest)
+                        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dest.path)
+                    } catch {
+                        failure = error.localizedDescription
+                    }
+                }
+                DispatchQueue.main.async {
+                    if let failure = failure {
+                        let alert = NSAlert()
+                        alert.alertStyle = .warning
+                        alert.messageText = "Could not save \(dest.lastPathComponent)"
+                        alert.informativeText = failure
+                        alert.beginSheetModal(for: self.window, completionHandler: nil)
+                    }
+                }
+            }.resume()
+        }
+        // a sheet is already open (e.g. two quick clicks on Save): use a separate dialog instead
+        if window.attachedSheet != nil { finish(panel.runModal()) } else { panel.beginSheetModal(for: window, completionHandler: finish) }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         if (error as NSError).code == NSURLErrorCancelled || (error as NSError).code == 102 { return } // 102: turned into a download
         // the page failed to load (engine restarting?): retry the load; spawnEngine won't duplicate a running engine
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.startEngine() }
-    }
-
-    // MARK: WKDownloadDelegate (Save HAR, Export Root Certificate)
-
-    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse,
-                  suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = suggestedFilename
-        panel.canCreateDirectories = true
-        panel.beginSheetModal(for: window) { result in
-            guard result == .OK, let url = panel.url else { return completionHandler(nil) }
-            try? FileManager.default.removeItem(at: url)
-            completionHandler(url)
-        }
     }
 
     // MARK: WKUIDelegate
