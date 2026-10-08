@@ -31,6 +31,7 @@ const state = {
   resView: store.get('resView', 'TextView'),
   tab: store.get('tab', 'inspector'),
   filterTerms: [],
+  syntaxWrap: store.get('syntaxWrap', false),
   keepFloor: 0, // highest session id dropped by Keep
   atBottom: null,
 };
@@ -456,8 +457,8 @@ function openContext(x, y) {
 }
 
 // ------------------------------------------------------------ inspectors
-const REQ_VIEWS = ['Headers', 'TextView', 'WebForms', 'HexView', 'Cookies', 'Raw', 'JSON'];
-const RES_VIEWS = ['Headers', 'TextView', 'ImageView', 'HexView', 'WebView', 'Cookies', 'Raw', 'JSON'];
+const REQ_VIEWS = ['Headers', 'TextView', 'SyntaxView', 'WebForms', 'HexView', 'Cookies', 'Raw', 'JSON'];
+const RES_VIEWS = ['Headers', 'TextView', 'SyntaxView', 'ImageView', 'HexView', 'WebView', 'Cookies', 'Raw', 'JSON'];
 function buildViewTabs() {
   $('#reqTabs').innerHTML = REQ_VIEWS.map((v) => `<button data-v="${v}">${v}</button>`).join('');
   $('#resTabs').innerHTML = RES_VIEWS.map((v) => `<button data-v="${v}">${v}</button>`).join('');
@@ -592,26 +593,108 @@ function rawView(d, which) {
   if (view && view.size) body = view.text != null ? (view.text.length > 1e6 ? view.text.slice(0, 1e6) + '\n… (truncated for display)' : view.text) : `[${n0(view.size)} bytes of binary data — see HexView]`;
   return `<pre class="tv">${esc(lines.join('\n') + '\n\n' + body)}</pre>`;
 }
+// ------------------------------------------------------------ JSON view: collapsible, like browser dev tools
 function jsonView(view) {
   const t = bodyText(view);
   if (!t) return '<div class="empty-note">No body</div>';
   let data;
-  try { data = JSON.parse(t); } catch { return '<div class="empty-note">The selected body does not contain valid JSON text.</div>'; }
-  let count = 0;
-  const node = (key, val, depth) => {
-    if (++count > 20000) return count === 20001 ? '<div class="hl muted">… (tree truncated)</div>' : '';
-    const label = key == null ? '' : esc(key);
+  try { data = JSON.parse(t); } catch { return '<div class="empty-note">This body is not valid JSON. Try TextView or SyntaxView.</div>'; }
+  const LIMIT = 20000;
+  let total = 0;
+  (function count(v) { if (total > LIMIT || !v || typeof v !== 'object') return; for (const k in v) { total++; count(v[k]); } })(data);
+  const openDepth = total > 400 ? 2 : 64; // big documents start with only the top levels open
+  let shown = 0;
+  const childPath = (parent, key, isIndex) => (isIndex ? `${parent}[${key}]` : /^[A-Za-z_$][\w$]*$/.test(key) ? (parent ? `${parent}.${key}` : key) : `${parent}[${JSON.stringify(key)}]`);
+  const prim = (v) => (v === null ? '<span class="jv-null">null</span>'
+    : typeof v === 'string' ? `<span class="jv-str">${esc(JSON.stringify(v))}</span>`
+    : typeof v === 'number' ? `<span class="jv-num">${v}</span>`
+    : `<span class="jv-bool">${v}</span>`);
+  const node = (key, val, depth, path, comma, isIndex) => {
+    if (++shown > LIMIT) return shown === LIMIT + 1 ? '<div class="jv-line jv-more">… too large to show in full. See TextView or SyntaxView.</div>' : '';
+    const k = key == null || isIndex ? '' : `<span class="jv-key">${esc(JSON.stringify(key))}</span><span class="jv-p">: </span>`;
+    const c = comma ? '<span class="jv-p">,</span>' : '';
+    const title = path ? ` title="${esc(path)}"` : '';
     if (val && typeof val === 'object') {
       const arr = Array.isArray(val);
-      const kids = arr ? val.map((v) => node(null, v, depth + 1)).join('') : Object.keys(val).map((k) => node(k, val[k], depth + 1)).join('');
-      const empty = arr ? !val.length : !Object.keys(val).length;
-      return `<details ${depth < 4 ? 'open' : ''}><summary>${label || (arr ? '[]' : '{}')}${empty ? ' <span class="muted">(empty)</span>' : ''}</summary><div class="kids">${kids}</div></details>`;
+      const keys = arr ? null : Object.keys(val);
+      const n = arr ? val.length : keys.length;
+      const [open, close] = arr ? ['[', ']'] : ['{', '}'];
+      if (!n) return `<div class="jv-line"${title}>${k}<span class="jv-b">${open}${close}</span>${c}</div>`;
+      const kids = arr
+        ? val.map((v, i) => node(i, v, depth + 1, childPath(path, i, true), i < n - 1, true)).join('')
+        : keys.map((kk, i) => node(kk, val[kk], depth + 1, childPath(path, kk, false), i < n - 1, false)).join('');
+      const label = arr ? `${n} item${n === 1 ? '' : 's'}` : `${n} key${n === 1 ? '' : 's'}`;
+      return `<details class="jv-node"${depth < openDepth ? ' open' : ''}><summary class="jv-line"${title}>${k}<span class="jv-b">${open}</span>` +
+        `<span class="jv-fold"><span class="jv-dots">…</span><span class="jv-b">${close}</span>${c}<span class="jv-count">${label}</span></span></summary>` +
+        `<div class="jv-kids">${kids}</div><div class="jv-line jv-end"><span class="jv-b">${close}</span>${c}</div></details>`;
     }
-    const v = val === null ? 'null' : typeof val === 'string' ? val : String(val);
-    return `<div class="hl">${label ? `<b>${label}</b>=` : ''}${esc(v)}</div>`;
+    return `<div class="jv-line"${title}>${k}${prim(val)}${c}</div>`;
   };
-  return `<div class="view-wrap"><div class="scroll"><div class="json-tree tree"><details open><summary>JSON</summary><div class="kids">${node(null, data, 0).replace(/^<details open><summary>(\[\]|\{\})/, '<details open><summary>$1')}</div></details></div></div>` +
-    `<div class="findbar"><button class="wbtn" data-expand>Expand All</button><button class="wbtn" data-collapse>Collapse</button><span class="grow"></span><button class="wbtn" data-copybody>Copy</button></div></div>`;
+  return `<div class="view-wrap"><div class="scroll"><div class="jv">${node(null, data, 0, '', false, false)}</div></div>` +
+    `<div class="findbar"><button class="wbtn" data-expand>Expand all</button><button class="wbtn" data-collapse>Collapse all</button><span class="muted small">Click ▸ to open or close; hover a value to see its path</span><span class="grow"></span><button class="wbtn" data-copybody>Copy</button></div></div>`;
+}
+
+// ------------------------------------------------------------ SyntaxView: highlighted code with line numbers
+function syntaxLang(ct, text) {
+  ct = String(ct || '').toLowerCase();
+  if (/json/.test(ct)) return 'json';
+  if (/html|xml|svg/.test(ct)) return 'markup';
+  if (/javascript|ecmascript/.test(ct)) return 'js';
+  if (/css/.test(ct)) return 'css';
+  if (/x-www-form-urlencoded/.test(ct)) return 'form';
+  const head = text.trimStart();
+  if (/^[{[]/.test(head)) { try { JSON.parse(text); return 'json'; } catch {} }
+  if (/^</.test(head)) return 'markup';
+  return 'text';
+}
+// Runs a tokenizer regex over text, escaping everything between matches.
+function tokenize(text, re, render) {
+  let out = '', last = 0, m;
+  re.lastIndex = 0;
+  while ((m = re.exec(text))) {
+    if (!m[0]) { re.lastIndex++; continue; }
+    out += esc(text.slice(last, m.index)) + render(m);
+    last = re.lastIndex;
+  }
+  return out + esc(text.slice(last));
+}
+const span = (cls, s) => `<span class="${cls}">${esc(s)}</span>`;
+const SYNTAX = {
+  json: (t) => tokenize(t, /("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\],])/g, (m) =>
+    m[1] ? (m[2] ? span('sx-key', m[1]) + esc(m[2]) : span('sx-str', m[1])) : m[3] ? span('sx-lit', m[3]) : m[4] ? span('sx-num', m[4]) : span('sx-p', m[5])),
+  markup: (t) => tokenize(t, /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<![^>]*>|<\?[\s\S]*?\?>|<\/?[A-Za-z][^>]*>/g, (m) => {
+    const tag = m[0];
+    if (tag.startsWith('<!--')) return span('sx-com', tag);
+    if (/^<[!?]/.test(tag)) return span('sx-doc', tag);
+    const p = tag.match(/^(<\/?)([^\s/>]+)([\s\S]*?)(\/?>)$/);
+    if (!p) return esc(tag);
+    const attrs = tokenize(p[3], /([^\s=]+)(\s*=\s*)?("[^"]*"|'[^']*'|[^\s"']+)?/g, (a) => span('sx-attr', a[1]) + (a[2] ? esc(a[2]) : '') + (a[3] ? span('sx-str', a[3]) : ''));
+    return span('sx-p', p[1]) + span('sx-tag', p[2]) + attrs + span('sx-p', p[4]);
+  }),
+  js: (t) => tokenize(t, /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`)|\b(async|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|export|extends|finally|for|from|function|if|import|in|instanceof|let|new|of|return|static|super|switch|this|throw|try|typeof|var|void|while|with|yield)\b|\b(true|false|null|undefined|NaN|Infinity)\b|\b(0x[\da-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/g, (m) =>
+    m[1] ? span('sx-com', m[1]) : m[2] ? span('sx-str', m[2]) : m[3] ? span('sx-kw', m[3]) : m[4] ? span('sx-lit', m[4]) : span('sx-num', m[5])),
+  css: (t) => tokenize(t, /(\/\*[\s\S]*?\*\/)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')|(@[\w-]+)|([\w-]+)(?=\s*:[^;{}]*[;}])|(#[\da-fA-F]{3,8}\b)|(-?\d*\.?\d+(?:px|em|rem|%|vh|vw|vmin|vmax|s|ms|deg|fr)?\b)|([{};:,])/g, (m) =>
+    m[1] ? span('sx-com', m[1]) : m[2] ? span('sx-str', m[2]) : m[3] ? span('sx-kw', m[3]) : m[4] ? span('sx-attr', m[4]) : m[5] ? span('sx-num', m[5]) : m[6] ? span('sx-num', m[6]) : span('sx-p', m[7])),
+  form: (t) => t.split('\n').map((line) => { const i = line.indexOf('='); return i === -1 ? span('sx-key', line) : span('sx-key', line.slice(0, i)) + span('sx-p', '=') + span('sx-str', line.slice(i + 1)); }).join('\n'),
+  text: (t) => esc(t),
+};
+const LANG_NAMES = { json: 'JSON', markup: 'HTML / XML', js: 'JavaScript', css: 'CSS', form: 'Form data', text: 'Plain text' };
+function syntaxView(view, ct) {
+  if (!view || !view.size) return '<div class="empty-note">No body</div>';
+  let text = bodyText(view);
+  if (text == null) return `<div class="empty-note">Binary body (${n0(view.size)} bytes). Use HexView${/image\//.test(ct || '') ? ' or ImageView' : ''}.</div>`;
+  const lang = syntaxLang(ct, text);
+  let note = '';
+  if (lang === 'json') { try { text = JSON.stringify(JSON.parse(text), null, 2); note = 'formatted'; } catch {} }
+  if (lang === 'form') { try { text = [...new URLSearchParams(text)].map(([k, v]) => `${k}=${v}`).join('\n'); note = 'decoded'; } catch {} }
+  const big = text.length > 1.5e6;
+  const html = big ? esc(text) : SYNTAX[lang](text);
+  const lines = text.split('\n').length;
+  const gutter = state.syntaxWrap ? '' : `<pre class="sx-gutter" aria-hidden="true">${Array.from({ length: lines }, (_, i) => i + 1).join('\n')}</pre>`;
+  return `<div class="view-wrap"><div class="scroll"><div class="sx${state.syntaxWrap ? ' wrap' : ''}">${gutter}<pre class="sx-code">${html}</pre></div></div>` +
+    `<div class="findbar"><label class="cb"><input type="checkbox" data-wrap${state.syntaxWrap ? ' checked' : ''}>Wrap lines</label>` +
+    `<span class="muted small">${LANG_NAMES[lang]}${note ? ', ' + note : ''} · ${n0(lines)} line${lines === 1 ? '' : 's'}${big ? ' · too large to color' : ''}</span>` +
+    `<span class="grow"></span><button class="wbtn" data-copybody>Copy</button></div></div>`;
 }
 function imageView(d) {
   const v = d.resBody;
@@ -642,6 +725,7 @@ function renderPane(which) {
     case 'Cookies': html = cookiesView(d, which); break;
     case 'Raw': html = rawView(d, which); break;
     case 'JSON': html = jsonView(body); break;
+    case 'SyntaxView': html = which === 'res' && d.source === 'pending' ? '<div class="empty-note">Waiting for the response…</div>' : syntaxView(body, hdrVal(which === 'req' ? d.reqHeaders : d.resHeaders, 'content-type')); break;
     case 'ImageView': html = imageView(d); break;
     case 'WebView': html = webView(d); break;
     default: html = '';
@@ -656,7 +740,8 @@ function renderPane(which) {
     else if (t.matches('[data-defs]')) window.open('https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers', '_blank', 'noopener');
     else if (t.matches('[data-copybody]')) copy(bodyText(body) || '', 'the body');
     else if (t.matches('[data-expand]')) $$('details', el).forEach((x) => (x.open = true));
-    else if (t.matches('[data-collapse]')) $$('details', el).forEach((x, i) => (x.open = i < 2));
+    else if (t.matches('[data-collapse]')) $$('details', el).forEach((x, i) => (x.open = i === 0)); // keep the root open
+    else if (t.matches('[data-wrap]')) { state.syntaxWrap = t.checked; store.set('syntaxWrap', state.syntaxWrap); renderPane(which); }
   };
   const fi = $('[data-findinput]', el);
   if (fi) fi.onkeydown = (e) => {

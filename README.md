@@ -121,7 +121,7 @@ back to a HAR file.
 | --- | --- |
 | Session list | Live requests with method, status, content type, the app that sent it (Chrome, curl, Python…), start time, duration and request/response sizes. Right-click the header to choose columns. Multi-select, color marks (<kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>6</kbd>, saved in exported HARs), right-click menu (copy as cURL, reissue, add to AutoResponder, save as HAR) |
 | QuickExec | The black box under the list. Type text to filter; `help` lists the commands |
-| Inspectors | Request and response views: Headers, TextView, WebForms, HexView, Cookies, Raw, JSON, ImageView, WebView |
+| Inspectors | Request and response views: Headers, TextView, SyntaxView (highlighted JSON, HTML/XML, JavaScript and CSS with line numbers), WebForms, HexView, Cookies, Raw, JSON (collapsible tree), ImageView, WebView |
 | Statistics | Bytes sent and received, and DNS, connect, TLS and server timings for the selected sessions |
 | AutoResponder | Rules, HAR groups and the rule editor |
 | Composer | Build and send a request, or edit and resend a captured one |
