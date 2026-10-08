@@ -367,3 +367,21 @@ pre.stats { margin: 0; padding: 6px 8px; font: 12px/1.45 var(--mono); flex: 1; o
 .sx-key { color: #881391; } .sx-str { color: #c41a16; } .sx-num { color: #1c00cf; } .sx-lit { color: #0d22aa; font-weight: 600; }
 .sx-p { color: #6b6b6b; } .sx-com { color: #4f8a3c; font-style: italic; } .sx-doc { color: #7a7a7a; }
 .sx-tag { color: #1a1aa6; } .sx-attr { color: #994500; } .sx-kw { color: #aa0d91; font-weight: 600; }
+
+/* the open HAR file, at the right of the menu bar */
+.docname { display: inline-flex; align-items: center; gap: 5px; padding: 0 10px; color: #333; font-size: 12px; max-width: 45vw; white-space: nowrap; }
+.docname > span { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.docname svg { width: 14px; height: 14px; }
+.docname em { font-style: normal; font-weight: 700; font-size: 14px; color: #333; margin-left: -2px; }
+.docname:not(.dirty) em { display: none; }
+
+/* TextWizard */
+.window.wizard-win { width: min(820px, 94vw); }
+.tw-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.tw-bar select { min-width: 270px; }
+#twIn { min-height: 120px; resize: vertical; }
+.tw-out { min-height: 140px; max-height: 42vh; overflow: auto; background: #fff; border: 1px solid #7a7a7a; }
+.tw-out pre { margin: 0; padding: 6px 8px; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; }
+.tw-out .tw-err { color: #c00000; padding: 8px; }
+.tw-out .tw-empty { color: var(--muted); padding: 8px; }
+.tw-out img { display: block; max-width: 100%; max-height: 220px; margin: 8px; border: 1px solid #ddd; background: repeating-conic-gradient(#f3f3f3 0 25%, #fff 0 50%) 0 0 / 16px 16px; }

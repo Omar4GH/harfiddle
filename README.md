@@ -109,11 +109,15 @@ In the session list, rows with a ⚡ icon and a purple background were answered 
 went to the real server. Row colors show the content type: HTML blue, JavaScript green, CSS purple, images gray,
 errors red.
 
-### View a HAR file
+### Open, edit and save HAR files
 
-Drag a `.har` onto the window and choose **Inspect** (or **File › Import Sessions**). The requests show up in the
-session list with all Inspectors, and nothing is sent anywhere. **Save** writes the list, or the selected sessions,
-back to a HAR file.
+Open a `.har` with **Load** / **File › Open** (<kbd>⌘</kbd>+<kbd>O</kbd>), or drag it onto the window and choose
+**Inspect**. The requests show up in the session list with all Inspectors, and nothing is sent anywhere. The open
+file's name is shown at the top, with a `*` once you add, remove or mark sessions and haven't saved yet.
+
+**Save** (<kbd>⌘</kbd>+<kbd>S</kbd>) writes the session list back to that file; **Save As** (<kbd>⇧</kbd>+<kbd>⌘</kbd>+<kbd>S</kbd>)
+picks a new one. With no file open, Save asks where to save. **Remove All** closes the file, so an empty list
+can't overwrite it.
 
 ### What's in the window
 
@@ -125,6 +129,7 @@ back to a HAR file.
 | Statistics | Bytes sent and received, and DNS, connect, TLS and server timings for the selected sessions |
 | AutoResponder | Rules, HAR groups and the rule editor |
 | Composer | Build and send a request, or edit and resend a captured one |
+| TextWizard | Encode and decode text: Base64/Base64URL, URL, HTML entities, hex, JS escapes, JWT, gzip inside Base64, Unix time, JSON. Select text in any inspector and right-click → Send to TextWizard (or Ctrl+E); it detects the encoding automatically |
 | Log | Imports, capture changes, connection and certificate errors |
 
 ![AutoResponder rules loaded from a HAR file](docs/screenshots/rules.png)
@@ -171,7 +176,8 @@ Any captured session can be turned into a rule with right-click › **Add to Aut
 | <kbd>F12</kbd> | System Proxy on/off | <kbd>R</kbd> | Reissue selected requests |
 | <kbd>Delete</kbd> | Remove selected | <kbd>Ctrl</kbd>+<kbd>X</kbd> | Remove all |
 | <kbd>⌘</kbd>+<kbd>A</kbd> | Select all | <kbd>⌘</kbd>+<kbd>U</kbd> | Copy URL |
-| <kbd>⌘</kbd>+<kbd>S</kbd> | Save sessions as HAR | <kbd>F7</kbd> / <kbd>F8</kbd> | Statistics / Inspectors |
+| <kbd>⌘</kbd>+<kbd>O</kbd> | Open a HAR file | <kbd>⌘</kbd>+<kbd>S</kbd> / <kbd>⇧</kbd>+<kbd>⌘</kbd>+<kbd>S</kbd> | Save / Save As |
+| <kbd>F7</kbd> / <kbd>F8</kbd> | Statistics / Inspectors | <kbd>Ctrl</kbd>+<kbd>E</kbd> | TextWizard (with the selected text) |
 | <kbd>⌘</kbd>+<kbd>F</kbd> or <kbd>/</kbd> | Search sessions | <kbd>Esc</kbd> | Clear the selection / search |
 | <kbd>Alt</kbd>+<kbd>Q</kbd> | Go to QuickExec | <kbd>⌘</kbd>+<kbd>Enter</kbd> | Execute in Composer |
 | <kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>6</kbd> | Mark red, blue, gold, green, orange, purple | <kbd>Ctrl</kbd>+<kbd>0</kbd> | Unmark |

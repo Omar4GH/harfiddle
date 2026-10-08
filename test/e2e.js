@@ -608,6 +608,29 @@ test('hostile HAR content is neutralised', async () => {
   assert(imported.every((x) => typeof x.status === 'number'), 'status is always a number');
 });
 
+test('open a HAR file by path, save back to it, and re-open it', async () => {
+  const dir = path.join(TMP, 'docs');
+  fs.mkdirSync(dir, { recursive: true });
+  const src = path.join(dir, 'demo-copy.har');
+  fs.copyFileSync(path.join(ROOT, 'examples/demo.har'), src);
+  await api('DELETE', '/api/sessions');
+  const opened = (await api('POST', '/api/sessions/open', { path: src })).data;
+  eq(opened.added, 8, 'sessions opened');
+  eq(opened.name, 'demo-copy.har');
+  await api('POST', '/api/sessions/mark', { ids: [(await sessions())[0].id], mark: 'green' });
+  const saved = (await api('POST', '/api/sessions/save', { path: src })).data;
+  eq(saved.count, 8, 'sessions saved');
+  assert(!fs.readdirSync(dir).some((f) => f.endsWith('.tmp')), 'no temporary file left behind');
+  const har = JSON.parse(fs.readFileSync(src, 'utf8'));
+  eq(har.log.entries.length, 8, 'file has every session');
+  eq(har.log.entries[0]._harfiddleMark, 'green', 'edits were written to the file');
+  await api('DELETE', '/api/sessions');
+  eq((await api('POST', '/api/sessions/open', { path: src })).data.added, 8, 're-opened');
+  eq((await api('POST', '/api/sessions/save', { path: path.join(dir, 'notes.txt') })).status, 400, 'only .har/.json');
+  eq((await api('POST', '/api/sessions/save', { path: 'relative.har' })).status, 400, 'absolute paths only');
+  eq((await api('POST', '/api/sessions/open', { path: path.join(dir, 'missing.har') })).status, 404, 'missing file');
+});
+
 test('proxy port can be changed live and is remembered after restart', async () => {
   const p2 = await freePort();
   const r = await api('POST', '/api/proxy-port', { port: p2 });

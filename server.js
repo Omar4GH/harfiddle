@@ -438,6 +438,21 @@ function sessionDetail(s) {
     resBody: bodyView(s.resBody, hdr(s.resHeaders, 'content-type')),
   };
 }
+// Writes sessions as a HAR file, entry by entry (one big JSON.stringify fails past ~512 MB).
+async function writeHar(out, list) {
+  const wait = () => new Promise((r) => { out.once('drain', r); out.once('close', r); out.once('error', r); });
+  out.write(`{"log":{"version":"1.2","creator":{"name":"HarFiddle","version":${JSON.stringify(require('./package.json').version)}},"pages":[],"entries":[\n`);
+  let first = true;
+  for (const s of list) {
+    if (s.method === 'CONNECT') continue;
+    if (out.destroyed) return;
+    const ok = out.write((first ? '' : ',\n') + JSON.stringify(sessionToHarEntry(s)));
+    first = false;
+    if (!ok) await wait();
+  }
+  out.end('\n]}}\n');
+}
+
 function sessionToHarEntry(s) {
   let qs = [];
   try { qs = [...new URL(s.url).searchParams].map(([name, value]) => ({ name, value })); } catch {}
@@ -1549,18 +1564,43 @@ async function api(req, res, u) {
   if (p === '/api/sessions/export.har' && m === 'GET') {
     const ids = u.searchParams.get('ids');
     const list = ids ? ids.split(',').map(Number).map((id) => sessions.get(id)).filter(Boolean) : [...sessions.values()];
-    // written entry by entry: one big JSON.stringify fails past ~512 MB (captures can hold far more)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="harfiddle-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.har"` });
-    res.write(`{"log":{"version":"1.2","creator":{"name":"HarFiddle","version":${JSON.stringify(require('./package.json').version)}},"pages":[],"entries":[\n`);
-    let first = true;
-    for (const s of list) {
-      if (s.method === 'CONNECT') continue;
-      if (res.destroyed) return;
-      const ok = res.write((first ? '' : ',\n') + JSON.stringify(sessionToHarEntry(s)));
-      first = false;
-      if (!ok) await new Promise((r) => { res.once('drain', r); res.once('close', r); });
+    await writeHar(res, list);
+    return;
+  }
+  // Open a HAR file from disk by its path (the app's Open dialog and dropped files provide the path).
+  if (p === '/api/sessions/open' && m === 'POST') {
+    const b = await jsonObject(req);
+    const file = String(b.path || '');
+    if (!path.isAbsolute(file)) return sendJson(res, 400, { error: 'An absolute file path is required' });
+    let st;
+    try { st = fs.statSync(file); } catch { return sendJson(res, 404, { error: `File not found: ${file}` }); }
+    if (!st.isFile()) return sendJson(res, 400, { error: `Not a file: ${file}` });
+    if (st.size > 1024 * 1024 * 1024) return sendJson(res, 400, { error: 'The file is larger than 1 GB' });
+    const r = importSessions(path.basename(file), fs.readFileSync(file, 'utf8'));
+    return sendJson(res, 200, { ...r, path: file });
+  }
+  // Save the session list (or some ids) to a HAR file: written next to it first, then swapped in, so a failed
+  // save never leaves a half-written file behind.
+  if (p === '/api/sessions/save' && m === 'POST') {
+    const b = await jsonObject(req);
+    const file = String(b.path || '');
+    if (!path.isAbsolute(file) || !/\.(har|json)$/i.test(file)) return sendJson(res, 400, { error: 'Choose a .har file to save to' });
+    const list = Array.isArray(b.ids) ? b.ids.map(Number).map((id) => sessions.get(id)).filter(Boolean) : [...sessions.values()];
+    const tmp = `${file}.harfiddle-${process.pid}.tmp`;
+    try {
+      const out = fs.createWriteStream(tmp);
+      const done = new Promise((resolve, reject) => { out.once('finish', resolve); out.once('error', reject); });
+      await writeHar(out, list);
+      await done;
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      return sendJson(res, 500, { error: `Could not save ${path.basename(file)}: ${e.message}` });
     }
-    return res.end('\n]}}\n');
+    const count = list.filter((s) => s.method !== 'CONNECT').length;
+    log(`Saved ${count} sessions to ${file}`);
+    return sendJson(res, 200, { path: file, name: path.basename(file), count });
   }
   if ((mm = p.match(/^\/api\/sessions\/(\d+)$/)) && m === 'GET') {
     const s = sessions.get(+mm[1]);

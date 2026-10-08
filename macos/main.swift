@@ -9,8 +9,22 @@
 //   defaults write io.github.harfiddle UIPort 9001
 import Cocoa
 import WebKit
+import UniformTypeIdentifiers
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+/// The web view also tells the page where dropped files live on disk, so Save can write back to an opened HAR.
+final class HarFiddleWebView: WKWebView {
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        if !urls.isEmpty, let json = try? JSONSerialization.data(withJSONObject: urls.map { $0.path }),
+           let list = String(data: json, encoding: .utf8) {
+            // sent before WebKit delivers the drop, so the page has the paths when its drop handler runs
+            evaluateJavaScript("window.__dropPaths = \(list); window.__dropPathsAt = Date.now();", completionHandler: nil)
+        }
+        return super.performDragOperation(sender)
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply {
     var window: NSWindow!
     var webView: WKWebView!
     var server: Process?
@@ -31,7 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         let config = WKWebViewConfiguration()
-        webView = WKWebView(frame: .zero, configuration: config)
+        config.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "harfiddle")
+        webView = HarFiddleWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.uiDelegate = self
         if #available(macOS 13.3, *) { webView.isInspectable = true }
@@ -290,6 +305,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         if (error as NSError).code == NSURLErrorCancelled || (error as NSError).code == 102 { return } // 102: turned into a download
         // the page failed to load (engine restarting?): retry the load; spawnEngine won't duplicate a running engine
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.startEngine() }
+    }
+
+    // MARK: messages from the page (native Open/Save dialogs, the open file shown in the title bar)
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage,
+                               replyHandler: @escaping (Any?, String?) -> Void) {
+        // only HarFiddle's own page may ask (never a previewed response inside a frame)
+        let origin = message.frameInfo.securityOrigin
+        guard message.frameInfo.isMainFrame, ["127.0.0.1", "localhost"].contains(origin.host), origin.port == uiPort,
+              let body = message.body as? [String: Any], let cmd = body["cmd"] as? String else {
+            return replyHandler(nil, "not allowed")
+        }
+        let harTypes = [UTType(filenameExtension: "har"), UTType.json].compactMap { $0 }
+        switch cmd {
+        case "pickOpen":
+            let panel = NSOpenPanel()
+            panel.allowsMultipleSelection = true
+            panel.canChooseDirectories = false
+            panel.allowedContentTypes = harTypes
+            panel.message = "Open HAR files"
+            panel.beginSheetModal(for: window) { result in
+                replyHandler(result == .OK ? panel.urls.map { $0.path } : [], nil)
+            }
+        case "pickSave":
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = (body["name"] as? String) ?? "sessions.har"
+            panel.allowedContentTypes = harTypes
+            panel.canCreateDirectories = true
+            panel.beginSheetModal(for: window) { result in
+                replyHandler(result == .OK ? panel.url?.path : nil, nil)
+            }
+        case "doc":
+            // the macOS document look: file name and icon in the title bar, a dot in the close button when edited
+            let name = body["name"] as? String
+            let path = body["path"] as? String
+            let dirty = (body["dirty"] as? Bool) ?? false
+            window.title = name.map { dirty ? "\($0) *" : $0 } ?? "HarFiddle"
+            window.subtitle = name == nil ? "" : "HarFiddle"
+            window.representedURL = path.map { URL(fileURLWithPath: $0) }
+            window.isDocumentEdited = dirty
+            replyHandler(true, nil)
+        default:
+            replyHandler(nil, "unknown command")
+        }
     }
 
     // MARK: WKUIDelegate

@@ -31,6 +31,7 @@ const state = {
   resView: store.get('resView', 'TextView'),
   tab: store.get('tab', 'inspector'),
   filterTerms: [],
+  doc: null, // the open HAR file: { name, path? (app), handle? (browser), dirty }
   syntaxWrap: store.get('syntaxWrap', false),
   keepFloor: 0, // highest session id dropped by Keep
   atBottom: null,
@@ -301,6 +302,7 @@ function upsertSession(s) {
     state.rows.set(s.id, tr);
     $('#sessBody').appendChild(tr);
     enforceKeep();
+    markDirty(); // a new session is now part of the open file's contents
   }
   paintRow(tr, s);
   if (s.id === state.focus && s.source !== 'pending' && state.detail && state.detail.source === 'pending') loadDetail(s.id);
@@ -926,6 +928,7 @@ function closeMenus() {
   $$('.menu.open').forEach((m) => m.classList.remove('open'));
   $('#ctx').hidden = true;
   $('#colmenu').hidden = true;
+  $('#selmenu').hidden = true;
 }
 function checks() {
   const s = state.settings;
@@ -1030,10 +1033,13 @@ function setShow(v) { state.show = v; $('#show').value = v; applyFilter(); }
 const COMMANDS = {
   capture: toggleSystemCapture,
   record: () => saveSetting('capture', state.settings.capture === false),
-  importSessions: () => $('#fileSessions').click(),
+  open: openDoc,
+  importSessions: openDoc,
+  save: saveDoc,
+  saveAs: () => saveDocAs(),
   importRules: () => $('#fileRules').click(),
-  saveAll: () => exportHar(null),
-  saveSelected: () => exportHar(selectedIds()),
+  saveAll: saveDoc,
+  saveSelected: () => { const ids = selectedIds(); return ids.length ? saveDocAs(ids) : status('Nothing selected to save', true); },
   copyUrl: () => copy(selectedIds().map((id) => state.sessions.get(id).url).join('\n'), 'URL'),
   copyCurl: async () => { const ids = selectedIds(); if (ids.length) copy((await Promise.all(ids.map(detailOf))).map(toCurl).join('\n\n'), 'cURL'); },
   selectAll: () => { const v = visibleIds(); select(v, state.focus ?? v[v.length - 1]); },
@@ -1056,6 +1062,7 @@ const COMMANDS = {
   help: () => openOptions('usage'),
   qxhelp: () => { showTab('log'); appendLog({ ts: Date.now(), msg: QX_HELP }); },
   about: () => openDialog('aboutDlg'),
+  wizard: () => openWizard(selectedText() || undefined),
   chrome: () => launch('chrome'),
   edge: () => launch('edge'),
   trust: trustCa,
@@ -1068,6 +1075,7 @@ async function markSelected(mark) {
   if (!ids.length) return status('Select sessions to mark', true);
   try {
     await api('/api/sessions/mark', { method: 'POST', json: { ids, mark } });
+    markDirty();
     status(mark ? `Marked ${ids.length} session${ids.length === 1 ? '' : 's'} ${mark}` : `Unmarked ${ids.length} session${ids.length === 1 ? '' : 's'}`);
   } catch (e) { status(e.message, true); }
 }
@@ -1088,7 +1096,7 @@ $('#sbCapture').addEventListener('click', toggleSystemCapture);
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
   if (e.key === 'Escape') {
-    const open = $$('.menu.open').length || !$('#ctx').hidden || !$('#colmenu').hidden || $$('.modal').some((m) => !m.hidden);
+    const open = $$('.menu.open').length || !$('#ctx').hidden || !$('#colmenu').hidden || !$('#selmenu').hidden || $$('.modal').some((m) => !m.hidden);
     closeMenus();
     $$('.modal').forEach((m) => (m.hidden = true));
     if (!open && !typing && state.sel.size) { state.anchor = null; select([], null); } // Esc deselects
@@ -1098,9 +1106,11 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'F8') { e.preventDefault(); showTab('inspector'); }
   else if (!typing && e.altKey && e.code === 'KeyQ') { e.preventDefault(); $('#qx').focus(); }
   else if ((e.metaKey || (!typing && e.ctrlKey)) && !e.altKey && e.key.toLowerCase() === 'f') { e.preventDefault(); focusSearch(); }
-  else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); run('saveAll'); }
+  else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); run(e.shiftKey ? 'saveAs' : 'save'); }
+  else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); run('open'); }
   else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'u') { e.preventDefault(); if (state.sel.size) run('copyUrl'); }
   else if (!typing && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'x') { e.preventDefault(); run('removeAll'); }
+  else if (!typing && e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'e') { e.preventDefault(); run('wizard'); }
   else if (!typing && e.ctrlKey && !e.metaKey && /^Digit[0-6]$/.test(e.code)) { e.preventDefault(); markSelected(MARK_KEYS[e.code.slice(5)]); }
   else if (!typing && e.key === '/') { e.preventDefault(); focusSearch(); }
   else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && state.tab === 'composer') { e.preventDefault(); $('#cSend').click(); }
@@ -1213,6 +1223,174 @@ function openOptions(page) {
   $$('.optpage').forEach((p) => (p.hidden = p.dataset.page !== page));
 }
 $('#optTabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) openOptions(b.dataset.v); });
+
+// ------------------------------------------------------------ TextWizard: encode / decode text (like Fiddler's)
+const utf8Bytes = (s) => new TextEncoder().encode(s);
+function bytesToB64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function b64ToBytes(s) {
+  // accepts standard and URL-safe Base64, with or without padding, line breaks or a data: URL prefix
+  let t = String(s).trim().replace(/^data:[^,]*;base64,/i, '').replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(t)) throw new Error('This is not valid Base64 (it contains other characters).');
+  t = t.replace(/=+$/, '');
+  if (t.length % 4 === 1) throw new Error('This is not valid Base64 (wrong length).');
+  t += '='.repeat((4 - (t.length % 4)) % 4);
+  const bin = atob(t);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function hexToBytes(s) {
+  const t = String(s).replace(/0x/gi, '').replace(/[\s:,-]+/g, '');
+  if (!/^[0-9a-f]*$/i.test(t) || t.length % 2) throw new Error('This is not valid hex (it needs pairs of 0-9 / a-f).');
+  return Uint8Array.from(t.match(/../g) || [], (h) => parseInt(h, 16));
+}
+const IMAGE_SIGS = [['89504e47', 'image/png'], ['ffd8ff', 'image/jpeg'], ['47494638', 'image/gif'], ['52494646', 'image/webp'], ['3c737667', 'image/svg+xml']];
+// Decoded bytes become text when they're readable UTF-8, otherwise a hex dump (plus a preview for images).
+function bytesResult(bytes, how) {
+  let text = null;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch {}
+  if (text != null && !/[\x00-\x08\x0e-\x1f]/.test(text)) return { text, info: `${how} · ${n0(bytes.length)} bytes of text` };
+  const head = [...bytes.subarray(0, 4)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const img = IMAGE_SIGS.find(([sig]) => head.startsWith(sig));
+  const gz = head.startsWith('1f8b');
+  return { bytes, image: img && img[1], info: `${how} · ${n0(bytes.length)} bytes of binary data${img ? ` (${img[1]})` : gz ? ' (gzip: try "From Base64, then gunzip")' : ''}` };
+}
+async function inflate(bytes) {
+  for (const format of ['gzip', 'deflate', 'deflate-raw']) {
+    try {
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream(format));
+      return { out: new Uint8Array(await new Response(stream).arrayBuffer()), format };
+    } catch {}
+  }
+  throw new Error('The decoded data is not gzip or deflate compressed.');
+}
+function jsUnescape(s) {
+  return String(s).replace(/\\(u\{[0-9a-f]+\}|u[0-9a-f]{4}|x[0-9a-f]{2}|[0-7]{1,3}|.)/gi, (m, e) => {
+    if (/^u\{/i.test(e)) return String.fromCodePoint(parseInt(e.slice(2, -1), 16));
+    if (/^[ux]/i.test(e) && e.length > 1) return String.fromCharCode(parseInt(e.slice(1), 16));
+    if (/^[0-7]+$/.test(e)) return String.fromCharCode(parseInt(e, 8));
+    return { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', 0: '\0' }[e] ?? e;
+  });
+}
+function jwtDecode(s) {
+  const parts = String(s).trim().split('.');
+  if (parts.length < 2) throw new Error('A JWT has parts separated by dots: header.payload.signature');
+  const dec = (p) => JSON.parse(new TextDecoder().decode(b64ToBytes(p)));
+  const header = dec(parts[0]);
+  const payload = dec(parts[1]);
+  const when = (k) => (typeof payload[k] === 'number' ? `\n${k}: ${new Date(payload[k] * 1000).toLocaleString()}${k === 'exp' && payload[k] * 1000 < Date.now() ? '  (expired)' : ''}` : '');
+  return { text: `// Header\n${JSON.stringify(header, null, 2)}\n\n// Payload\n${JSON.stringify(payload, null, 2)}\n${when('iat')}${when('nbf')}${when('exp')}\n\n// Signature (not verified)\n${parts[2] || '(none)'}`, info: 'JWT' };
+}
+const TW_LABELS = {};
+const TW = {
+  b64dec: (s) => bytesResult(b64ToBytes(s), 'Base64 decoded'),
+  b64enc: (s) => ({ text: bytesToB64(utf8Bytes(s)) }),
+  b64urlenc: (s) => ({ text: bytesToB64(utf8Bytes(s)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') }),
+  urldec: (s) => {
+    const t = String(s).replace(/\+/g, ' ');
+    try { return { text: decodeURIComponent(t) }; } catch { return { text: t.replace(/%([0-9a-f]{2})/gi, (m, h) => String.fromCharCode(parseInt(h, 16))), info: 'not valid UTF-8; decoded byte by byte' }; }
+  },
+  urlenc: (s) => ({ text: encodeURIComponent(s) }),
+  htmldec: (s) => { const t = document.createElement('textarea'); t.innerHTML = s; return { text: t.value }; },
+  htmlenc: (s) => ({ text: esc(s) }),
+  hexdec: (s) => bytesResult(hexToBytes(s), 'Hex decoded'),
+  hexenc: (s) => ({ text: [...utf8Bytes(s)].map((b) => b.toString(16).padStart(2, '0')).join('') }),
+  jsunesc: (s) => ({ text: jsUnescape(s) }),
+  jsesc: (s) => ({ text: JSON.stringify(String(s)).slice(1, -1) }),
+  jwt: jwtDecode,
+  gunzip: async (s) => { const { out, format } = await inflate(b64ToBytes(s)); return bytesResult(out, `Base64 → ${format}`); },
+  unixtime: (s) => {
+    const n = Number(String(s).trim());
+    if (!Number.isFinite(n)) throw new Error('Enter a number of seconds or milliseconds since 1970.');
+    const ms = Math.abs(n) < 1e11 ? n * 1000 : n;
+    const d = new Date(ms);
+    return { text: `Local: ${d.toLocaleString()}\nUTC:   ${d.toISOString()}\n(${Math.abs(n) < 1e11 ? 'seconds' : 'milliseconds'} since 1970)` };
+  },
+  json: (s) => ({ text: JSON.stringify(JSON.parse(s), null, 2) }),
+  jsonmin: (s) => ({ text: JSON.stringify(JSON.parse(s)) }),
+};
+// Guesses what the text is, so selecting something and choosing "Send to TextWizard" usually just works.
+function detectTransform(s) {
+  const t = String(s).trim();
+  if (!t) return 'b64enc';
+  if (/^[\w-]{8,}\.[\w-]{8,}\.[\w-]*$/.test(t)) { try { if (jwtDecode(t)) return 'jwt'; } catch {} }
+  if (/^\d{10}(\d{3})?$/.test(t)) return 'unixtime';
+  if (/%[0-9a-f]{2}/i.test(t)) return 'urldec';
+  if (/&(#\d+|#x[0-9a-f]+|[a-z]+);/i.test(t)) return 'htmldec';
+  if (/\\(u[0-9a-f]{4}|x[0-9a-f]{2}|[nrt"])/i.test(t)) return 'jsunesc';
+  if (/^(0x)?([0-9a-f]{2}[\s:]?){4,}$/i.test(t) && /[a-f]/i.test(t) && t.replace(/[\s:]/g, '').length % 2 === 0 && !/^[A-Za-z0-9+/]+=*$/.test(t.replace(/\s/g, '')) || /^[0-9a-f]+$/.test(t) && t.length % 2 === 0 && t.length >= 16 && /[a-f]/.test(t) && /\d/.test(t) && !/[g-z]/i.test(t)) return 'hexdec';
+  if (/^(data:[^,]*;base64,)?[A-Za-z0-9+/_\-\s]+={0,2}$/.test(t) && t.replace(/\s/g, '').length >= 8) {
+    try { const b = b64ToBytes(t); return b[0] === 0x1f && b[1] === 0x8b ? 'gunzip' : 'b64dec'; } catch {}
+  }
+  if (/^[{[]/.test(t)) { try { JSON.parse(t); return 'json'; } catch {} }
+  return 'b64enc';
+}
+let twRun = 0;
+async function runWizard() {
+  const input = $('#twIn').value;
+  let mode = $('#twMode').value;
+  const auto = mode === 'auto';
+  if (auto) mode = detectTransform(input);
+  $('#twInInfo').textContent = input ? `${n0(input.length)} characters` : '';
+  const out = $('#twOut');
+  const run = ++twRun;
+  if (!input) { out.innerHTML = '<div class="tw-empty">The result appears here as you type.</div>'; $('#twOutInfo').textContent = ''; return; }
+  let r;
+  try { r = await TW[mode](input); } catch (e) { r = { error: e.message }; }
+  if (run !== twRun) return; // a newer input arrived meanwhile
+  const label = $(`#twMode option[value="${mode}"]`).textContent;
+  if (r.text != null && $('#twFormat').checked && mode !== 'jsonmin' && /^\s*[{[]/.test(r.text)) { try { r.text = JSON.stringify(JSON.parse(r.text), null, 2); } catch {} }
+  state.twOutput = r.error ? '' : r.text != null ? r.text : bytesToB64(r.bytes);
+  $('#twOutInfo').textContent = (auto ? `auto-detected: ${label}` : label) + (r.info ? ` · ${r.info}` : '');
+  if (r.error) out.innerHTML = `<div class="tw-err">${esc(r.error)}</div>`;
+  else if (r.text != null) out.innerHTML = `<pre>${esc(r.text)}</pre>`;
+  else {
+    const hex = hexView({ size: r.bytes.length, base64: bytesToB64(r.bytes.subarray(0, 65536)) });
+    out.innerHTML = (r.image ? `<img alt="" src="data:${r.image};base64,${bytesToB64(r.bytes)}">` : '') + hex;
+  }
+}
+function openWizard(text, mode = 'auto') {
+  closeMenus();
+  if (text != null) $('#twIn').value = text;
+  $('#twMode').value = mode;
+  openDialog('wizardDlg');
+  runWizard();
+  $('#twIn').focus();
+}
+let twTimer;
+$('#twIn').addEventListener('input', () => { clearTimeout(twTimer); twTimer = setTimeout(runWizard, 120); });
+$('#twMode').addEventListener('change', runWizard);
+$('#twFormat').addEventListener('change', runWizard);
+$('#twSwap').addEventListener('click', () => { if (state.twOutput) { $('#twIn').value = state.twOutput; $('#twMode').value = 'auto'; runWizard(); } });
+$('#twCopy').addEventListener('click', () => state.twOutput && copy(state.twOutput, 'the output'));
+
+// Select text in an inspector, then right-click: send it to the TextWizard
+const selectedText = () => String(window.getSelection() || '').trim();
+for (const view of ['#reqView', '#resView']) {
+  $(view).addEventListener('contextmenu', (e) => {
+    const sel = selectedText();
+    if (!sel) return; // nothing selected: no menu
+    e.preventDefault();
+    closeMenus();
+    state.selText = sel;
+    const m = $('#selmenu');
+    m.hidden = false;
+    const r = m.getBoundingClientRect();
+    m.style.left = Math.min(e.clientX, innerWidth - r.width - 4) + 'px';
+    m.style.top = Math.min(e.clientY, innerHeight - r.height - 4) + 'px';
+  });
+}
+$('#selmenu').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tw]');
+  if (!b) return;
+  $('#selmenu').hidden = true;
+  if (b.dataset.tw === 'copy') return copy(state.selText, 'the selection');
+  openWizard(state.selText, b.dataset.tw);
+});
 
 // ------------------------------------------------------------ log
 function appendLog(e) {
@@ -1410,12 +1588,103 @@ $('#testRun').addEventListener('click', async () => {
 });
 $('#testUrl').addEventListener('keydown', (e) => e.key === 'Enter' && $('#testRun').click());
 
+// ------------------------------------------------------------ the open HAR file ("document")
+// The macOS app provides real file paths through its native Open/Save dialogs and for dropped files; in a
+// browser, Chrome's File System Access API lets Save write back to the file. Otherwise Save falls back to a
+// download.
+const native = window.webkit?.messageHandlers?.harfiddle || null;
+const HAR_PICKER_TYPES = [{ description: 'HAR file', accept: { 'application/json': ['.har', '.json'] } }];
+function setDoc(doc) {
+  state.doc = doc;
+  renderDoc();
+}
+function markDirty() {
+  if (state.doc && !state.doc.dirty) { state.doc.dirty = true; renderDoc(); }
+}
+function renderDoc() {
+  const d = state.doc;
+  const el = $('#docName');
+  el.hidden = !d;
+  el.classList.toggle('dirty', !!d?.dirty);
+  $('span', el).textContent = d ? d.name : '';
+  el.title = d ? (d.path || d.name) + (d.path || d.handle ? '' : ' (Save asks where to save)') : '';
+  document.title = d ? `${d.name}${d.dirty ? ' *' : ''} · HarFiddle` : 'HarFiddle Web Debugger';
+  if (native) native.postMessage({ cmd: 'doc', name: d?.name || null, path: d?.path || null, dirty: !!d?.dirty }).catch(() => {});
+}
+const defaultHarName = () => `harfiddle-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.har`;
+async function openPath(p) {
+  const r = await api('/api/sessions/open', { method: 'POST', json: { path: p } });
+  setDoc({ name: r.name, path: r.path, dirty: false });
+  status(`Opened ${r.name}: ${r.added} sessions`);
+}
+async function openHandle(handle) {
+  const f = await handle.getFile();
+  await importSessionFiles([f], true);
+  setDoc({ name: f.name, handle, dirty: false });
+}
+async function openDoc() {
+  try {
+    if (native) {
+      for (const p of (await native.postMessage({ cmd: 'pickOpen' })) || []) await openPath(p);
+    } else if (window.showOpenFilePicker) {
+      let handles;
+      try { handles = await window.showOpenFilePicker({ multiple: true, types: HAR_PICKER_TYPES }); } catch { return; } // cancelled
+      for (const h of handles) await openHandle(h);
+    } else {
+      $('#fileSessions').click();
+    }
+  } catch (e) { status(e.message, true); }
+}
+async function writeDocToPath(p, ids) {
+  const r = await api('/api/sessions/save', { method: 'POST', json: { path: p, ...(ids ? { ids } : {}) } });
+  if (!ids) setDoc({ name: r.name, path: r.path, dirty: false });
+  status(`Saved ${r.count} session${r.count === 1 ? '' : 's'} to ${r.name}`);
+}
+async function writeDocToHandle(handle, ids) {
+  const perm = { mode: 'readwrite' };
+  if (handle.queryPermission && (await handle.queryPermission(perm)) !== 'granted' && (await handle.requestPermission(perm)) !== 'granted') {
+    throw new Error('HarFiddle was not allowed to write to that file');
+  }
+  const res = await fetch('/api/sessions/export.har' + (ids ? '?ids=' + ids.join(',') : ''));
+  if (!res.ok) throw new Error('Could not export the sessions');
+  const text = await res.text();
+  const w = await handle.createWritable();
+  await w.write(text);
+  await w.close();
+  if (!ids) setDoc({ name: handle.name, handle, dirty: false });
+  status(`Saved to ${handle.name}`);
+}
+async function saveDoc() {
+  try {
+    const d = state.doc;
+    if (d?.path) return await writeDocToPath(d.path);
+    if (d?.handle) return await writeDocToHandle(d.handle);
+    return await saveDocAs();
+  } catch (e) { status(e.message, true); }
+}
+async function saveDocAs(ids) {
+  try {
+    const suggested = !ids && state.doc ? state.doc.name : defaultHarName();
+    if (native) {
+      const p = await native.postMessage({ cmd: 'pickSave', name: suggested });
+      if (p) await writeDocToPath(p, ids);
+    } else if (window.showSaveFilePicker) {
+      let h;
+      try { h = await window.showSaveFilePicker({ suggestedName: suggested, types: HAR_PICKER_TYPES }); } catch { return; } // cancelled
+      await writeDocToHandle(h, ids);
+    } else {
+      exportHar(ids || null);
+    }
+  } catch (e) { status(e.message, true); }
+}
+
 // ------------------------------------------------------------ HAR import (files + drag & drop)
-async function importSessionFiles(files) {
+async function importSessionFiles(files, quiet) {
   for (const f of files) {
     try {
       const r = await api('/api/sessions/import?name=' + encodeURIComponent(f.name), { method: 'POST', body: await f.text() });
-      status(`Imported ${r.added} sessions from ${f.name}`);
+      status(`Opened ${f.name}: ${r.added} sessions`);
+      if (!quiet) setDoc({ name: f.name, dirty: false }); // no path: Save will ask where to save
     } catch (e) { status(`${f.name}: ${e.message}`, true); }
   }
 }
@@ -1453,10 +1722,25 @@ window.addEventListener('drop', (e) => {
   e.preventDefault();
   const zone = $('#drop .zone.hot')?.dataset.zone || 'inspect';
   hideDrop();
-  const files = [...e.dataTransfer.files].filter((f) => /\.(har|json)$/i.test(f.name));
-  if (!files.length) return status('Drop .har files', true);
-  if (zone === 'rules') importRuleFiles(files);
-  else importSessionFiles(files);
+  // Where each file lives on disk, so Save can write back to it: the app passes the paths of dropped files;
+  // Chrome hands out file handles (they must be requested right here, during the drop event).
+  const paths = window.__dropPaths && Date.now() - window.__dropPathsAt < 5000 ? window.__dropPaths : [];
+  const items = [...e.dataTransfer.items].filter((i) => i.kind === 'file');
+  const picked = items.map((i) => ({ file: i.getAsFile(), handle: i.getAsFileSystemHandle ? i.getAsFileSystemHandle().catch(() => null) : null }))
+    .filter((x) => x.file && /\.(har|json)$/i.test(x.file.name));
+  if (!picked.length) return status('Drop .har files', true);
+  if (zone === 'rules') return importRuleFiles(picked.map((x) => x.file));
+  (async () => {
+    for (const { file, handle } of picked) {
+      try {
+        const p = paths.find((x) => x.split('/').pop() === file.name);
+        const h = !p && handle ? await handle : null;
+        if (p) await openPath(p);
+        else if (h && h.kind === 'file') await openHandle(h);
+        else await importSessionFiles([file]);
+      } catch (err) { status(`${file.name}: ${err.message}`, true); }
+    }
+  })();
 });
 
 // ------------------------------------------------------------ composer
@@ -1549,8 +1833,9 @@ function connect() {
     $('#sbText').textContent = 'Lost connection to HarFiddle. Is it still running? Reconnecting…';
   };
   es.addEventListener('session', (e) => upsertSession(JSON.parse(e.data)));
-  es.addEventListener('removed', (e) => dropRows(JSON.parse(e.data).ids));
+  es.addEventListener('removed', (e) => { dropRows(JSON.parse(e.data).ids); markDirty(); });
   es.addEventListener('cleared', () => {
+    setDoc(null); // Remove All closes the file, so an empty list can't overwrite it by accident
     $('#sessBody').innerHTML = '';
     state.rows.clear();
     state.sessions.clear();

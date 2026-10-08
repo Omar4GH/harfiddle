@@ -46,6 +46,7 @@
   <symbol id="i-rec" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="#fff" stroke="#8d8d8d"/><circle cx="8" cy="8" r="4" fill="#d9302c"/></symbol>
   <symbol id="i-rec-off" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="#fff" stroke="#8d8d8d"/><rect x="5.3" y="5" width="1.9" height="6" fill="#6d6d6d"/><rect x="8.8" y="5" width="1.9" height="6" fill="#6d6d6d"/></symbol>
   <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 1.6 15 14H1z" fill="#ffd34d" stroke="#a87b00" stroke-linejoin="round"/><path d="M8 6v4M8 11.7v.4" stroke="#3d2c00" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-wizard" viewBox="0 0 16 16"><path d="m2.5 13.5 8-8" stroke="#6b4b1e" stroke-width="2.2" stroke-linecap="round"/><path d="m9.6 6.4 1.4-1.4" stroke="#f2b705" stroke-width="2.4" stroke-linecap="round"/><path d="M12.5 1.5v2.4M11.3 2.7h2.4M14 6v1.6M13.2 6.8h1.6M8 1.2v1.4M7.3 1.9h1.4" stroke="#e08a00" stroke-width="1.1" stroke-linecap="round"/></symbol>
   <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="#2f74d0"/><path d="M8 7v4.5M8 4.6v.4" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/></symbol>
 </svg>
 
@@ -56,11 +57,12 @@
       <button data-cmd="record" data-check="record">Record Sessions</button>
       <button data-cmd="capture" data-check="capture">Capture System Traffic<kbd>F12</kbd></button>
       <hr>
-      <button data-cmd="importSessions">Import Sessions (HAR)…</button>
-      <button data-cmd="importRules">Import HAR as AutoResponder Rules…</button>
+      <button data-cmd="open">Open HAR File…<kbd>⌘O</kbd></button>
+      <button data-cmd="save">Save<kbd>⌘S</kbd></button>
+      <button data-cmd="saveAs">Save As…<kbd>⇧⌘S</kbd></button>
+      <button data-cmd="saveSelected" data-needs="sel">Save Selected Sessions As…</button>
       <hr>
-      <button data-cmd="saveAll">Save All Sessions as HAR<kbd>⌘S</kbd></button>
-      <button data-cmd="saveSelected" data-needs="sel">Save Selected Sessions as HAR</button>
+      <button data-cmd="importRules">Import HAR as AutoResponder Rules…</button>
     </div>
   </div>
   <div class="menu"><button class="mb">Edit</button>
@@ -98,6 +100,7 @@
   <div class="menu"><button class="mb">Tools</button>
     <div class="dropdown">
       <button data-cmd="options">Options…</button>
+      <button data-cmd="wizard">TextWizard…<kbd>Ctrl+E</kbd></button>
       <hr>
       <button data-cmd="chrome">Launch Chrome via HarFiddle</button>
       <button data-cmd="edge" class="needs-edge">Launch Edge via HarFiddle</button>
@@ -130,6 +133,8 @@
       <button data-cmd="about">About HarFiddle</button>
     </div>
   </div>
+  <span class="grow"></span>
+  <span class="docname" id="docName" hidden><svg><use href="#i-har"/></svg><span></span><em title="Unsaved changes">*</em></span>
 </nav>
 
 <!-- toolbar -->
@@ -167,9 +172,10 @@
   </label>
   <span class="tb-sep"></span>
   <button class="tb" data-cmd="find" title="Find sessions (Ctrl+F)"><svg><use href="#i-find"/></svg>Find</button>
-  <button class="tb" data-cmd="saveAll" title="Save sessions as a .har file"><svg><use href="#i-save"/></svg>Save</button>
-  <button class="tb" data-cmd="importSessions" title="Open a .har file in the session list"><svg><use href="#i-open"/></svg>Load</button>
+  <button class="tb" data-cmd="save" title="Save the sessions to the open .har file, or choose one (⌘S)"><svg><use href="#i-save"/></svg>Save</button>
+  <button class="tb" data-cmd="open" title="Open a .har file in the session list (⌘O)"><svg><use href="#i-open"/></svg>Load</button>
   <span class="tb-sep"></span>
+  <button class="tb" data-cmd="wizard" title="Encode and decode text: Base64, URL, hex, JWT, gzip… (Ctrl+E). Tip: select text in an inspector and right-click."><svg><use href="#i-wizard"/></svg>TextWizard</button>
   <button class="tb" data-cmd="chrome" title="Launch Chrome through HarFiddle (separate profile, certificate pre-accepted)"><svg><use href="#i-globe"/></svg>Browse</button>
   <span class="grow"></span>
   <button class="tb" data-cmd="options" title="Tools › Options"><svg><use href="#i-options"/></svg>Options</button>
@@ -348,6 +354,15 @@
 </footer>
 
 <div class="dropdown ctx" id="colmenu" hidden></div>
+<div class="dropdown ctx" id="selmenu" hidden>
+  <button data-tw="auto"><svg><use href="#i-wizard"/></svg>Send to TextWizard<kbd>Ctrl+E</kbd></button>
+  <hr>
+  <button data-tw="b64dec">Decode Base64</button>
+  <button data-tw="urldec">URL-decode</button>
+  <button data-tw="jwt">Decode JWT</button>
+  <hr>
+  <button data-tw="copy">Copy</button>
+</div>
 <div class="dropdown ctx" id="ctx" hidden>
   <button data-cmd="addRule" data-needs="sel"><svg><use href="#i-bolt"/></svg>Add to AutoResponder</button>
   <hr>
@@ -438,6 +453,49 @@ http://localhost:3000  send to another server (REGEX $1, $2 … allowed)
       <div id="testResult" class="test-result"></div>
     </div>
     <div class="wfoot"><button class="wbtn default" id="testRun">Test</button><button class="wbtn" data-close>Close</button></div>
+  </div>
+</div>
+
+<div class="modal" id="wizardDlg" hidden>
+  <div class="window wizard-win" role="dialog" aria-label="TextWizard">
+    <div class="wtitle"><span>TextWizard</span><button class="wclose" data-close aria-label="Close">✕</button></div>
+    <div class="wbody">
+      <div class="tw-bar">
+        <label class="fld inline">Transform
+          <select id="twMode">
+            <option value="auto">Auto-detect</option>
+            <optgroup label="Decode">
+              <option value="b64dec">From Base64 / Base64URL</option>
+              <option value="urldec">URL-decode</option>
+              <option value="htmldec">HTML-decode entities</option>
+              <option value="hexdec">From hex</option>
+              <option value="jsunesc">Unescape JS string (\n, \u00e9…)</option>
+              <option value="jwt">Decode JWT</option>
+              <option value="gunzip">From Base64, then gunzip / inflate</option>
+              <option value="unixtime">Unix timestamp → date</option>
+            </optgroup>
+            <optgroup label="Encode">
+              <option value="b64enc">To Base64</option>
+              <option value="b64urlenc">To Base64URL</option>
+              <option value="urlenc">URL-encode</option>
+              <option value="htmlenc">HTML-encode</option>
+              <option value="hexenc">To hex</option>
+              <option value="jsesc">Escape as JS string</option>
+            </optgroup>
+            <optgroup label="Format">
+              <option value="json">Format JSON</option>
+              <option value="jsonmin">Minify JSON</option>
+            </optgroup>
+          </select>
+        </label>
+        <label class="cb"><input type="checkbox" id="twFormat" checked>Format JSON results</label>
+        <span class="grow"></span>
+        <button class="wbtn" id="twSwap" title="Move the output to the input, e.g. to decode something that was encoded twice">⇅ Swap</button>
+      </div>
+      <label class="fld"><span>Input <span class="muted" id="twInInfo"></span></span><textarea id="twIn" class="mono" rows="8" spellcheck="false" placeholder="Paste or type text, or select text in an inspector and choose Send to TextWizard"></textarea></label>
+      <div class="fld"><span>Output <span class="muted" id="twOutInfo"></span></span><div class="tw-out" id="twOut"></div></div>
+    </div>
+    <div class="wfoot"><button class="wbtn" id="twCopy">Copy output</button><button class="wbtn default" data-close>Close</button></div>
   </div>
 </div>
 
